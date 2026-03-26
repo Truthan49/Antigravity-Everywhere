@@ -67,21 +67,33 @@ async function updateFeishuText(messageId: string, text: string, appId?: string,
 
 export async function broadcastFeishuMessage(text: string) {
   const storeData = feishuStore.load();
+  const config = feishuConfigStore.get();
   const openIds = Object.keys(storeData);
   if (openIds.length === 0) return;
   for (const openId of openIds) {
-    await sendFeishuText(openId, text);
+    const session = storeData[openId];
+    // Only broadcast to users who are interacting with the global bot, to prevent 'open_id cross app' error
+    if (!session.botAppId || session.botAppId === config.appId) {
+      await sendFeishuText(openId, text);
+    }
   }
 }
 
 async function handleWorkspaceSelected(openId: string, wsUri: string) {
-  // Find a valid server connection to start cascade
-  await refreshOwnerMap();
-  const anyConn = Array.from(convOwnerMap.values())[0];
-  if (!anyConn) {
-    await sendFeishuText(openId, '未找到可用的语言服务器引擎。');
+  // Find the exact server connection instead of a random one
+  const servers = await discoverLanguageServers();
+  const targetServer = servers.find(s => 
+    s.workspace?.includes(wsUri.replace('file://', '')) || wsUri.includes(s.workspace || '\0')
+  ) || servers[0];
+  
+  if (!targetServer) {
+    await sendFeishuText(openId, '未找到该工作区的运行实例，请先启动对应的工作空间。');
     return;
   }
+  
+  const { getApiKey } = await import('@/lib/bridge/statedb');
+  const apiKey = getApiKey() || 'gateway';
+
 
   const allConvs = await getDynamicConversations();
   const wsConvs = allConvs.filter(c => {
@@ -103,7 +115,7 @@ async function handleWorkspaceSelected(openId: string, wsUri: string) {
   } else {
     await sendFeishuText(openId, '正在初始化新会话，请稍候...');
     try {
-      const res = await grpc.startCascade(anyConn.port, anyConn.csrf, anyConn.apiKey, wsUri);
+      const res = await grpc.startCascade(targetServer.port, targetServer.csrf, apiKey, wsUri);
       const newId = res.cascadeId;
       if (newId) {
         addLocalConversation(newId, wsUri, '来自飞书的新对话');
@@ -203,12 +215,15 @@ export async function subscribeToAgent(cascadeId: string, feishuOpenId: string, 
           clearInterval(timer);
           updateFeishu();
           
-          // Do NOT blindly abort() here! Keep the stream open just a little bit longer in case trailing updates arrive,
-          // or just let the NEXT message's subscribeToAgent call the cleanup function in activeStreams.
           setTimeout(() => {
              // Optional Feishu broadcast hook upon completion
              const statusText = status === 'CASCADE_RUN_STATUS_DONE' ? '✅ 任务执行完毕' : '❌ 任务执行出错';
              sendFeishuText(feishuOpenId, `🔔 [Gateway 提醒]\n会话 ${cascadeId.slice(0, 8)} ${statusText}。`, targetAppId, targetAppSecret);
+             
+             // MEMORY LEAK FIX: Ensure we deregister the cleanup hook permanently!
+             if (activeStreams.has(cascadeId)) {
+               activeStreams.get(cascadeId)!();
+             }
           }, 1000);
         }
       }
@@ -231,6 +246,10 @@ export async function subscribeToAgent(cascadeId: string, feishuOpenId: string, 
       isThinking = false;
       clearInterval(timer);
       console.warn('Stream disconnect', err);
+      // MEMORY LEAK FIX
+      if (activeStreams.has(cascadeId)) {
+        activeStreams.get(cascadeId)!();
+      }
       resolveSub(); // In case it errors immediately
     }
   );
@@ -255,11 +274,16 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
     return { success: false, error: 'AppID/Secret为空' };
   }
 
-  // Currently lark-wsclient doesn't expose a clean stop/disconnect method publicly out of the box that works universally
-  // We can just create a new client and let the old one garbage collect or sever its connection by discarding references
-  // (In a perfect scenario, there'd be activeWSClient.disconnect() or .stop())
+  // Start fresh and prevent zombie long-running sockets
   if (activeWSClient) {
-    console.log('[Feishu] Discarding previous WSClient instance.');
+    console.log('[Feishu] Discarding previous Global WSClient instance.');
+    try {
+      const origProto = Object.getPrototypeOf(activeWSClient);
+      if (typeof origProto.close === 'function') {
+        (activeWSClient as any).close();
+      }
+    } catch (err) {}
+    activeWSClient = null;
   }
 
   try {
@@ -270,6 +294,7 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
 
     const eventDispatcher = new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data: any) => {
+        try {
         console.error('[FEISHU_RAW_EVENT_RECEIVED]', JSON.stringify(data).slice(0, 400));
         const openId = (data?.sender?.sender_id as any)?.open_id;
         const unionId = (data?.sender?.sender_id as any)?.union_id;
@@ -289,8 +314,8 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
     text = text.trim();
     
     // Explicitly persist the session to disk if it's their first interaction
-    // This allows the broadcast API to discover their openId later!
-    feishuStore.updateSession(openId, { state: session.state, unionId });
+    // Since this is the global bot receiving, botAppId is the global one.
+    feishuStore.updateSession(openId, { state: session.state, unionId, botAppId: config.appId });
 
     const helpContent = `👋 欢迎使用 Antigravity 飞书智能助手！
 
@@ -503,14 +528,19 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
         await sendFeishuText(openId, `✅ 成功恢复历史会话！可继续提问。`);
       } else if (!isNaN(idx) && idx === hists.length) {
         await sendFeishuText(openId, `正在初始化新会话，请稍候...`);
-        await refreshOwnerMap();
-        const anyConn = Array.from(convOwnerMap.values())[0];
-        if (!anyConn) {
-          await sendFeishuText(openId, '未找到可用的语言服务器引擎。');
+        const servers = await discoverLanguageServers();
+        const targetServer = servers.find(s => 
+          s.workspace?.includes(wsUri!.replace('file://', '')) || wsUri!.includes(s.workspace || '\0')
+        ) || servers[0];
+        
+        if (!targetServer) {
+          await sendFeishuText(openId, '未找到该工作区的运行实例。');
           return;
         }
         try {
-          const res = await grpc.startCascade(anyConn.port, anyConn.csrf, anyConn.apiKey, wsUri!);
+          const { getApiKey } = await import('@/lib/bridge/statedb');
+          const apiKey = getApiKey() || 'gateway';
+          const res = await grpc.startCascade(targetServer.port, targetServer.csrf, apiKey, wsUri!);
           const newId = res.cascadeId;
           if (newId) {
             addLocalConversation(newId, wsUri!, '来自飞书的新对话');
@@ -594,6 +624,9 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
     } catch (e: any) {
       await sendFeishuText(openId, `发送失败: ${e.message}`);
     }
+    } catch (globalErr: any) {
+      console.error('[FEISHU_DISPATCH_GLOBAL_ERROR]', globalErr);
+    }
   } // ends the async (data) => function body
     }); // ends eventDispatcher.register({...});
 
@@ -624,10 +657,17 @@ export async function startWorkspaceBotClient(botConfig: WorkspaceBotConfig): Pr
     return { success: false, error: '配置不完整或未启用' };
   }
 
-  // Stop existing client for this workspace if any
+  // Stop existing client for this workspace safely
   const existing = workspaceWSClients.get(botConfig.workspaceUri);
   if (existing) {
     console.log(`[Feishu] Discarding previous WSClient for workspace: ${botConfig.workspaceUri}`);
+    try {
+      const origProto = Object.getPrototypeOf(existing);
+      if (typeof origProto.close === 'function') {
+        (existing as any).close();
+      }
+    } catch {}
+    workspaceWSClients.delete(botConfig.workspaceUri);
   }
 
   try {
@@ -641,6 +681,7 @@ export async function startWorkspaceBotClient(botConfig: WorkspaceBotConfig): Pr
 
     const eventDispatcher = new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data: any) => {
+        try {
         console.error(`[FEISHU_WS_BOT] workspace=${wsLabel}`, JSON.stringify(data).slice(0, 300));
         const openId = (data?.sender?.sender_id as any)?.open_id;
         if (!openId) return;
@@ -653,7 +694,7 @@ export async function startWorkspaceBotClient(botConfig: WorkspaceBotConfig): Pr
         } catch {}
         text = text.trim();
 
-        feishuStore.updateSession(openId, { state: 'idle' });
+        feishuStore.updateSession(openId, { state: 'idle', botAppId: botConfig.appId });
 
         if (!text || text === '/help' || text === '?' || text === 'help') {
           await sendFeishuText(openId,
@@ -742,6 +783,9 @@ export async function startWorkspaceBotClient(botConfig: WorkspaceBotConfig): Pr
         } catch (e: any) {
           await sendFeishuText(openId, `❌ 发送失败: ${e.message}`, botConfig.appId, botConfig.appSecret);
         }
+        } catch (wsErr: any) {
+          console.error('[FEISHU_DISPATCH_WORKSPACE_ERROR]', wsErr);
+        }
       }
     });
 
@@ -770,6 +814,12 @@ export function stopWorkspaceBotClient(workspaceUri: string) {
   const client = workspaceWSClients.get(workspaceUri);
   if (client) {
     console.log(`[Feishu] Stopping workspace bot for: ${workspaceUri}`);
+    try {
+      const origProto = Object.getPrototypeOf(client);
+      if (typeof origProto.close === 'function') {
+        (client as any).close();
+      }
+    } catch {}
     workspaceWSClients.delete(workspaceUri);
   }
 }

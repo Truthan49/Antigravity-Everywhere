@@ -13,6 +13,11 @@ import next from 'next';
 import { parse } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createLogger } from './src/lib/logger';
+import crypto from 'crypto';
+
+if (!process.env.INTERNAL_ACCESS_TOKEN) {
+  process.env.INTERNAL_ACCESS_TOKEN = crypto.randomBytes(32).toString('hex');
+}
 
 const log = createLogger('Server');
 
@@ -42,9 +47,9 @@ async function ensureBridge() {
     
     // --- Security Fix: Prevent external access to internal routes ---
     if (parsedUrl.pathname?.startsWith('/_internal/')) {
-      const ip = req.socket.remoteAddress;
-      if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') {
-        log.warn({ ip, path: parsedUrl.pathname }, 'Blocked unauthorized internal access');
+      const providedToken = req.headers['x-internal-token'];
+      if (providedToken !== process.env.INTERNAL_ACCESS_TOKEN) {
+        log.warn({ ip: req.socket.remoteAddress, path: parsedUrl.pathname }, 'Blocked unauthorized internal access');
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Forbidden IP access' }));
         return;
@@ -205,27 +210,35 @@ async function ensureBridge() {
         async (err: Error) => {
           log.warn({ cascadeId: cascadeId.slice(0,8), err: err.message }, 'Stream ended, reconnecting...');
           setTimeout(async () => {
-            if (ws.readyState === ws.OPEN) {
-              await ensureBridge();
-              await gateway.refreshOwnerMap();
-              const newOwner = gateway.getOwnerConnection(cascadeId);
-              if (newOwner) {
-                log.info({ cascadeId: cascadeId.slice(0,8), port: newOwner.port }, 'Stream reconnected');
-                startStreamForId(cascadeId, newOwner);
-              } else {
-                log.warn({ cascadeId: cascadeId.slice(0,8) }, 'No server found during reconnect, retrying in 2s...');
-                // Second attempt after additional delay
-                setTimeout(async () => {
-                  if (ws.readyState === ws.OPEN) {
-                    await gateway.refreshOwnerMap();
-                    const retryOwner = gateway.getOwnerConnection(cascadeId);
-                    if (retryOwner) {
-                      log.info({ cascadeId: cascadeId.slice(0,8), port: retryOwner.port }, 'Stream reconnected (2nd attempt)');
-                      startStreamForId(cascadeId, retryOwner);
+            try {
+              if (ws.readyState === ws.OPEN) {
+                await ensureBridge();
+                await gateway.refreshOwnerMap();
+                const newOwner = gateway.getOwnerConnection(cascadeId);
+                if (newOwner) {
+                  log.info({ cascadeId: cascadeId.slice(0,8), port: newOwner.port }, 'Stream reconnected');
+                  startStreamForId(cascadeId, newOwner);
+                } else {
+                  log.warn({ cascadeId: cascadeId.slice(0,8) }, 'No server found during reconnect, retrying in 2s...');
+                  // Second attempt after additional delay
+                  setTimeout(async () => {
+                    try {
+                      if (ws.readyState === ws.OPEN) {
+                        await gateway.refreshOwnerMap();
+                        const retryOwner = gateway.getOwnerConnection(cascadeId);
+                        if (retryOwner) {
+                          log.info({ cascadeId: cascadeId.slice(0,8), port: retryOwner.port }, 'Stream reconnected (2nd attempt)');
+                          startStreamForId(cascadeId, retryOwner);
+                        }
+                      }
+                    } catch (e: any) {
+                      log.error({ cascadeId: cascadeId.slice(0,8), err: e.message }, 'Stream reconnect (2nd attempt) failed');
                     }
-                  }
-                }, 2000);
+                  }, 2000);
+                }
               }
+            } catch (e: any) {
+              log.error({ cascadeId: cascadeId.slice(0,8), err: e.message }, 'Stream reconnect failed');
             }
           }, 500);
         }

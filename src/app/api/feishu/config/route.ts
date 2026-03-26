@@ -23,7 +23,10 @@ export async function POST(req: Request) {
     const port = process.env.PORT || '3000';
     let wsResult = { success: false, error: 'Unknown error' };
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/_internal/feishu/restart_global`, { method: 'POST' });
+      const resp = await fetch(`http://127.0.0.1:${port}/_internal/feishu/restart_global`, { 
+        method: 'POST',
+        headers: { 'x-internal-token': process.env.INTERNAL_ACCESS_TOKEN || '' }
+      });
       wsResult = await resp.json();
     } catch (err: any) {
       wsResult.error = err.message;

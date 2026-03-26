@@ -15,6 +15,7 @@ export interface FeishuUserSession {
   preferredModel?: string;    // User's globally preferred model ID
   unionId?: string;           // User's cross-app union ID
   pendingWorkspaceUri?: string; // Cache for delegation flow
+  botAppId?: string;          // Application ID of the bot handling this session
 }
 
 export const feishuStore = {

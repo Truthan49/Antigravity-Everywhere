@@ -20,73 +20,12 @@ const CONVERSATIONS_DIR = path.join(homedir(), '.gemini/antigravity/conversation
 interface ConvCache { id: string; title: string; workspace: string; mtime: number; steps: number; }
 let convCache: ConvCache[] = [];
 
+import { getDynamicConversations } from '@/lib/bridge/gateway';
+
 // GET /api/conversations — list conversations
 export async function GET() {
   try {
-    const files = readdirSync(CONVERSATIONS_DIR)
-      .filter(f => f.endsWith('.pb'))
-      .map(f => {
-        const id = f.replace('.pb', '');
-        const stat = statSync(path.join(CONVERSATIONS_DIR, f));
-        return { id, mtime: stat.mtimeMs, size: stat.size };
-      })
-      .sort((a, b) => b.mtime - a.mtime);
-
-    await refreshOwnerMap();
-
-    const sqliteConvs = getConversations();
-    const sqliteMap = new Map<string, any>();
-    sqliteConvs.forEach((c: any) => sqliteMap.set(c.id, c));
-
-    const oldCacheMap = new Map<string, ConvCache>();
-    convCache.forEach(c => oldCacheMap.set(c.id, c));
-
-    const conns = await getAllConnections();
-    const serverTrajectories = new Map<string, Map<string, any>>();
-    for (const conn of conns) {
-      try {
-        const data = await grpc.getAllCascadeTrajectories(conn.port, conn.csrf);
-        const summaries = data?.trajectorySummaries || {};
-        serverTrajectories.set(String(conn.port), new Map(Object.entries(summaries)));
-      } catch { }
-    }
-
-    const results: ConvCache[] = [];
-
-    for (const file of files) {
-      let title = '';
-      let workspace = '';
-      let steps = 0;
-
-      const owner = convOwnerMap.get(file.id);
-      if (owner) {
-        const ownerTraj = serverTrajectories.get(String(owner.port));
-        const live = ownerTraj?.get(file.id);
-        if (live) {
-          title = live.summary || '';
-          if (live.workspaces?.length > 0) {
-            workspace = live.workspaces[0].workspaceFolderAbsoluteUri || '';
-          }
-          steps = live.stepCount || 0;
-        }
-      }
-
-      if (!title) {
-        const lc = oldCacheMap.get(file.id);
-        if (lc?.title) { title = lc.title; workspace = workspace || lc.workspace; steps = Math.max(steps, lc.steps); }
-      }
-
-      const sqliteEntry = sqliteMap.get(file.id);
-      if (!title && sqliteEntry?.title && sqliteEntry.title !== 'Untitled') {
-        title = sqliteEntry.title; workspace = workspace || sqliteEntry.workspace || '';
-        steps = Math.max(steps, sqliteEntry.steps || 0);
-      }
-
-      workspace = workspace || sqliteEntry?.workspace || '';
-      results.push({ id: file.id, title: title || `Conversation ${file.id.slice(0, 8)}`, workspace, mtime: file.mtime, steps });
-    }
-
-    convCache = results;
+    const results = await getDynamicConversations();
     return NextResponse.json(results);
   } catch (e: any) {
     const conversations = getConversations();

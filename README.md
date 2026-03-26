@@ -1,12 +1,12 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/Truthan49/Antigravity-Mobility-CLI/main/public/logo.png" width="120" alt="Antigravity Logo" />
+  <img src="https://raw.githubusercontent.com/Truthan49/Antigravity-Everywhere/main/public/logo.png" width="120" alt="Antigravity Logo" />
   <h1>Antigravity Mobility | 你的私人 AI 智能体控制台</h1>
   <p>一个专为开发者打造的 Web 界面，帮你统一管理本地所有的 AI 助手（Agent）、大模型配置、工具插件和知识库数据。</p>
   
   <p>
-    <a href="https://github.com/Truthan49/Antigravity-Mobility-CLI/issues"><img alt="Issues" src="https://img.shields.io/github/issues/Truthan49/Antigravity-Mobility-CLI" /></a>
-    <a href="https://github.com/Truthan49/Antigravity-Mobility-CLI/pulls"><img alt="Pull Requests" src="https://img.shields.io/github/issues-pr/Truthan49/Antigravity-Mobility-CLI" /></a>
-    <a href="https://github.com/Truthan49/Antigravity-Mobility-CLI/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
+    <a href="https://github.com/Truthan49/Antigravity-Everywhere/issues"><img alt="Issues" src="https://img.shields.io/github/issues/Truthan49/Antigravity-Everywhere" /></a>
+    <a href="https://github.com/Truthan49/Antigravity-Everywhere/pulls"><img alt="Pull Requests" src="https://img.shields.io/github/issues-pr/Truthan49/Antigravity-Everywhere" /></a>
+    <a href="https://github.com/Truthan49/Antigravity-Everywhere/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
   </p>
 </div>
 
@@ -70,7 +70,7 @@
 打开你 Mac 或 Linux 电脑的终端，复制粘贴并回车运行下面这行命令：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Truthan49/Antigravity-Mobility-CLI/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Truthan49/Antigravity-Everywhere/main/install.sh | bash
 ```
 
 > *(这个脚本会自动帮你下载最新代码、安装 Node.js 库，并为你建好所有必要的配置文件夹。)*

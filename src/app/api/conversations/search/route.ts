@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import util from 'util';
 import path from 'path';
 import os from 'os';
+import * as fs from 'fs';
 
-const execAsync = util.promisify(exec);
+const execFileAsync = util.promisify(execFile);
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -16,17 +17,34 @@ export async function GET(req: Request) {
 
   try {
     const convDir = path.join(os.homedir(), '.gemini', 'antigravity', 'conversations');
-    // Use grep -a (process as text), -i (ignore case), -m 2 (max 2 matches per file), -H (print filename)
-    // -o (only matching, maybe with context? No, just match the line to keep it simple)
-    // grep might fail if no match is found, which is fine (exit code 1)
-    const escapedQuery = q.replace(/"/g, '\\"');
+    if (!fs.existsSync(convDir)) {
+      return NextResponse.json({ results: [] });
+    }
     
-    // Using grep -a -i -H "${q}" *.pb
-    // Limit to latest modified files? For now, grep is fast enough for <1000 files.
-    const cmd = `cd "${convDir}" && grep -a -i -H -m 2 "${escapedQuery}" *.pb || true`;
-    
-    const { stdout } = await execAsync(cmd, { timeout: 5000 });
-    
+    // Get all .pb files safely using Node.js
+    const files = fs.readdirSync(convDir).filter(f => f.endsWith('.pb'));
+    if (files.length === 0) {
+      return NextResponse.json({ results: [] });
+    }
+
+    // Use child_process.execFile to safely pass user input as an argument.
+    // This prevents Command Injection (RCE) by completely avoiding a shell.
+    let stdout = '';
+    try {
+      const { stdout: out } = await execFileAsync('grep', ['-a', '-i', '-H', '-m', '2', q, ...files], { 
+        cwd: convDir,
+        timeout: 5000 
+      });
+      stdout = out;
+    } catch (err: any) {
+      // grep exits with 1 if no matches are found, which is fine.
+      if (err.code === 1) {
+        stdout = '';
+      } else {
+        throw err;
+      }
+    }
+
     if (!stdout.trim()) {
       return NextResponse.json({ results: [] });
     }

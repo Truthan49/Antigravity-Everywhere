@@ -18,8 +18,16 @@ export async function POST(req: Request) {
       appSecret: config.appSecret || ''
     });
 
-    // Start or restart the WebSocket client
-    const wsResult = await startFeishuClient();
+    // Call the custom server to start/restart the WebSocket client 
+    // This avoids spawning long-lived WebSockets inside the ephemeral Next.js API worker.
+    const port = process.env.PORT || '3000';
+    let wsResult = { success: false, error: 'Unknown error' };
+    try {
+      const resp = await fetch(`http://127.0.0.1:${port}/_internal/feishu/restart_global`, { method: 'POST' });
+      wsResult = await resp.json();
+    } catch (err: any) {
+      wsResult.error = err.message;
+    }
     
     if (!wsResult.success) {
       return NextResponse.json({ error: wsResult.error || '连线飞书失败' }, { status: 400 });

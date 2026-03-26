@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getAllConnections, grpc } from '@/lib/bridge/gateway';
+import fs, { existsSync } from 'fs';
+import path from 'path';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,6 +18,50 @@ export async function GET() {
       ruleMap.set(rule.name, rule);
     }
     for (const conn of conns) {
+      if (!conn.workspace) continue;
+      const wsPath = conn.workspace.replace(/^file:\/\//, '');
+
+      // 1. Manually parse local rules from `.agents/rules.md` and `.agents/rules/*.md`
+      const tryAddRule = (filepath: string, defaultName: string) => {
+        if (!existsSync(filepath)) return;
+        try {
+          const content = fs.readFileSync(filepath, 'utf-8');
+          const name = path.basename(filepath, '.md');
+          const descMatch = content.match(/^description:\s*(.*)$/m);
+          const key = filepath;
+          if (!ruleMap.has(key)) {
+            ruleMap.set(key, {
+              name: name === 'rules' ? defaultName : name,
+              description: descMatch ? descMatch[1].trim() : '',
+              path: filepath,
+              content,
+              scope: 'workspace',
+              baseDir: path.dirname(filepath),
+              workspace: conn.workspace
+            });
+          }
+        } catch(e) {}
+      };
+
+      try {
+        // Single file check
+        tryAddRule(path.join(wsPath, '.agents', 'rules.md'), 'project-rules');
+        tryAddRule(path.join(wsPath, '.cursorrules'), 'cursor-rules');
+        tryAddRule(path.join(wsPath, '.clinerules'), 'cline-rules');
+        
+        // Directory check
+        const rulesDir = path.join(wsPath, '.agents', 'rules');
+        if (existsSync(rulesDir) && fs.statSync(rulesDir).isDirectory()) {
+          const files = fs.readdirSync(rulesDir);
+          for (const file of files) {
+            if (file.endsWith('.md')) {
+              tryAddRule(path.join(rulesDir, file), file.replace('.md', ''));
+            }
+          }
+        }
+      } catch(e) { console.error('Error reading local rules', e) }
+
+      // 2. Try gRPC as fallback
       try {
         const data = await grpc.getAllRules(conn.port, conn.csrf);
         if (data?.rules) {
@@ -42,9 +88,8 @@ export async function GET() {
   }
 }
 
-import { existsSync, mkdirSync, copyFileSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, copyFileSync, rmSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
-import path from 'path';
 import { exec } from 'child_process';
 
 const openFileInEditor = (pathToOpen: string) => {

@@ -4,7 +4,7 @@ import { homedir } from 'os';
 
 const STORE_PATH = join(homedir(), '.gemini', 'antigravity', 'feishu-chats.json');
 
-export type ChatState = 'idle' | 'selecting_workspace' | 'selecting_history' | 'selecting_workspace_history' | 'selecting_model';
+export type ChatState = 'idle' | 'selecting_workspace' | 'selecting_history' | 'selecting_workspace_history' | 'selecting_model' | 'selecting_delegation';
 
 export interface FeishuUserSession {
   activeCascadeId?: string;
@@ -13,6 +13,8 @@ export interface FeishuUserSession {
   historyCache?: string[];    // Temp cache for numbered selection
   modelsCache?: string[];     // Temp cache for model selection
   preferredModel?: string;    // User's globally preferred model ID
+  unionId?: string;           // User's cross-app union ID
+  pendingWorkspaceUri?: string; // Cache for delegation flow
 }
 
 export const feishuStore = {

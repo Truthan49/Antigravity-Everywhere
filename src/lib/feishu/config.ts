@@ -90,7 +90,12 @@ export const workspaceBotStore = {
     this.saveAll(bots);
   },
 
-  /** Get bot config for a specific workspace */
+  /** Get all bot configs for a specific workspace */
+  getAllByWorkspace(workspaceUri: string): WorkspaceBotConfig[] {
+    return this.getAll().filter(b => b.workspaceUri === workspaceUri && b.enabled);
+  },
+
+  /** Get first bot config for a specific workspace */
   getByWorkspace(workspaceUri: string): WorkspaceBotConfig | undefined {
     return this.getAll().find(b => b.workspaceUri === workspaceUri);
   },

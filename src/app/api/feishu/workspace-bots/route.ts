@@ -39,18 +39,28 @@ export async function POST(req: Request) {
     // Save config
     workspaceBotStore.upsert(botConfig);
 
-    // Start or restart the client if enabled, stop if disabled
+    // Tell the main generic server process to restart the WS connection
+    const port = process.env.PORT || '3000';
     if (botConfig.enabled && botConfig.appId && botConfig.appSecret) {
-      const result = await startWorkspaceBotClient(botConfig);
-      if (!result.success) {
-        return NextResponse.json({ 
-          ok: false, 
-          error: `配置已保存，但机器人连接失败: ${result.error}` 
-        }, { status: 400 });
+      let r = { success: false, error: 'Unknown' };
+      try {
+         const resp = await fetch(`http://127.0.0.1:${port}/_internal/feishu/restart_workspace`, {
+            method: 'POST',
+            body: JSON.stringify({ action: 'upsert', workspaceUri, enabled: true, config: botConfig })
+         });
+         r = await resp.json();
+      } catch (e: any) { r.error = e.message; }
+      
+      if (!r.success) {
+        return NextResponse.json({ ok: false, error: `配置已保存，但机器人连接失败: ${r.error}` }, { status: 400 });
       }
       return NextResponse.json({ ok: true, message: '独立机器人已启动连接' });
     } else {
-      stopWorkspaceBotClient(workspaceUri);
+      try {
+        await fetch(`http://127.0.0.1:${port}/_internal/feishu/restart_workspace`, {
+           method: 'POST', body: JSON.stringify({ action: 'upsert', workspaceUri, enabled: false })
+        });
+      } catch {}
       return NextResponse.json({ ok: true, message: '配置已保存（未启用或凭证不完整）' });
     }
   } catch (e: any) {
@@ -73,10 +83,16 @@ export async function DELETE(req: Request) {
 
     // Lookup the workspace URI before removing so we can stop the client
     const bot = workspaceBotStore.getByAppId(appId);
-    if (bot) {
-      stopWorkspaceBotClient(bot.workspaceUri);
-    }
     workspaceBotStore.remove(appId);
+    
+    if (bot) {
+      try {
+        const port = process.env.PORT || '3000';
+        await fetch(`http://127.0.0.1:${port}/_internal/feishu/restart_workspace`, {
+           method: 'POST', body: JSON.stringify({ action: 'delete', workspaceUri: bot.workspaceUri })
+        });
+      } catch (e) {}
+    }
     return NextResponse.json({ ok: true, message: '已解绑' });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });

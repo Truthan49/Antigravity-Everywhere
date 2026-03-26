@@ -369,7 +369,7 @@ export default function Sidebar({ activeId, onSelect, onNew, open, onClose, onKn
       let hasError = false;
       function safeFetch<T>(p: Promise<T>, fallback: T): Promise<T> {
         return p.catch((e) => {
-          console.error('[Sidebar Load] Fetch error:', e);
+          console.warn('[Sidebar Load] Fetch error:', e.message || e);
           hasError = true;
           return fallback;
         });

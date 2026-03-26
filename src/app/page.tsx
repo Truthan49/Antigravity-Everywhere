@@ -38,6 +38,7 @@ export default function Home() {
   const [sendError, setSendError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const lastStepCountRef = useRef(0);
+  const activeIdRef = useRef<string | null>(null);
 
   const loadLocalSkills = useCallback(() => {
     api.skills().then(setSkills).catch(() => {});
@@ -82,6 +83,11 @@ export default function Home() {
     api.setModel(model).catch(console.error);
   }, []);
 
+  // Track previous status to detect idle→active transitions for auto-refresh
+  const prevStatusRef = useRef<string>('idle');
+  // Periodic refresh interval for active conversations
+  const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   useEffect(() => {
     wsRef.current = connectWs(
       (cascadeId, data, active, status, extra) => {
@@ -105,28 +111,96 @@ export default function Home() {
         });
 
         // Update main chat view only for the current active conversation
-        setActiveId(cur => {
-          if (cur === cascadeId) {
-            const newLen = data.steps?.length || 0;
-            if (newLen > 0 && newLen >= lastStepCountRef.current) {
+        if (activeIdRef.current === cascadeId) {
+          const newLen = data.steps?.length || 0;
+
+          // Detect idle→active transition: auto-refresh steps via HTTP as the
+          // gRPC stream may have reconnected late and missed the initial burst
+          const prevStatus = prevStatusRef.current;
+          const isTransitionToActive = active && (prevStatus === 'idle' || prevStatus === 'cancelled');
+          if (isTransitionToActive && newLen === 0) {
+            // Status changed but no steps yet — the delta stream likely missed
+            // the initial state. Trigger a full HTTP refresh after a brief delay.
+            console.log(`[WS] Status transition ${prevStatus}→${status} with 0 steps, scheduling HTTP refresh for ${cascadeId.slice(0,8)}`);
+            setTimeout(() => {
+              api.conversationSteps(cascadeId).then(freshData => {
+                const freshLen = freshData.steps?.length || 0;
+                if (freshLen > lastStepCountRef.current) {
+                  lastStepCountRef.current = freshLen;
+                  setSteps(freshData);
+                  console.log(`[WS] HTTP refresh recovered ${freshLen} steps for ${cascadeId.slice(0,8)}`);
+                }
+              }).catch(() => {});
+            }, 800);
+          }
+
+          if (newLen > 0) {
+            // Accept steps if count grew, OR if the data has steps we should display.
+            // Relaxed guard: always accept if newLen >= lastStepCount, and also accept
+            // if the data appears to contain a newer USER_INPUT (handles multi-turn sync).
+            if (newLen >= lastStepCountRef.current) {
               lastStepCountRef.current = newLen;
               setSteps(data);
-            } else if (newLen > 0) {
-              console.warn(`[WS] Guard filtered: newLen=${newLen} < lastStepCount=${lastStepCountRef.current} for ${cascadeId.slice(0,8)}`);
+            } else {
+              // Check if the incoming data has steps we missed (e.g. a new user input
+              // that arrived while we had stale lastStepCount from a previous session)
+              const hasNewUserInput = data.steps?.some((s: any, idx: number) =>
+                idx >= lastStepCountRef.current - 2 && s.type === 'CORTEX_STEP_TYPE_USER_INPUT'
+              );
+              if (hasNewUserInput) {
+                console.log(`[WS] Accepting newer data despite smaller newLen=${newLen} (has new USER_INPUT) for ${cascadeId.slice(0,8)}`);
+                lastStepCountRef.current = newLen;
+                setSteps(data);
+              } else {
+                console.warn(`[WS] Guard filtered: newLen=${newLen} < lastStepCount=${lastStepCountRef.current} for ${cascadeId.slice(0,8)}`);
+              }
             }
-            setIsActive(active);
-            setCascadeStatus(status);
-          } else {
-            console.log(`[WS] Ignored update for ${cascadeId.slice(0,8)} (active=${cur?.slice(0,8)})`);
           }
-          return cur;
-        });
+
+          prevStatusRef.current = status;
+          setIsActive(active);
+          setCascadeStatus(status);
+        } else {
+          console.log(`[WS] Ignored update for ${cascadeId.slice(0,8)} (active=${activeIdRef.current?.slice(0,8)})`);
+        }
       },
       setConnected,
       (newWs) => { wsRef.current = newWs; }
     );
     return () => { wsRef.current?.close(); };
   }, []);
+
+  // Periodic HTTP refresh: poll steps to catch updates the WS stream may miss.
+  // Fast polling (3s) when agent is running, slow polling (8s) for idle conversations
+  // to keep the view in sync with conversations driven by other clients (desktop app, etc).
+  useEffect(() => {
+    if (refreshIntervalRef.current) {
+      clearInterval(refreshIntervalRef.current);
+      refreshIntervalRef.current = null;
+    }
+    if (!activeId) return;
+
+    const pollMs = isActive ? 3000 : 8000;
+    refreshIntervalRef.current = setInterval(async () => {
+      if (!activeId) return;
+      try {
+        const freshData = await api.conversationSteps(activeId);
+        const freshLen = freshData.steps?.length || 0;
+        if (freshLen > lastStepCountRef.current) {
+          console.log(`[Poll] Recovered ${freshLen - lastStepCountRef.current} new steps for ${activeId.slice(0,8)}`);
+          lastStepCountRef.current = freshLen;
+          setSteps(freshData);
+        }
+      } catch { /* silent */ }
+    }, pollMs);
+
+    return () => {
+      if (refreshIntervalRef.current) {
+        clearInterval(refreshIntervalRef.current);
+        refreshIntervalRef.current = null;
+      }
+    };
+  }, [activeId, isActive]);
 
   const loadSteps = useCallback(async (id: string) => {
     setLoading(true);
@@ -141,6 +215,7 @@ export default function Home() {
   const handleSelect = (id: string, title: string, workspace?: string) => {
     console.log(`[Select] ${id.slice(0,8)} "${title}" | wsReady=${wsRef.current?.readyState} lastSteps=${lastStepCountRef.current}`);
     setActiveId(id);
+    activeIdRef.current = id;
     setActiveTitle(title || id.slice(0, 8));
     setSteps(null);
     setSendError(null);

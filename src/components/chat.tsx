@@ -223,6 +223,8 @@ function StepBubble({ step, originalIndex, totalSteps, allSteps, isFastMode, onP
   const type = step.type || '';
   const contentRef = useRef<HTMLDivElement>(null);
   const [showThoughts, setShowThoughts] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editText, setEditText] = useState('');
 
   useEffect(() => {
     if (!contentRef.current) return;
@@ -276,9 +278,6 @@ function StepBubble({ step, originalIndex, totalSteps, allSteps, isFastMode, onP
     const media = step.userInput?.media || [];
     const plainText = items.filter(i => i.text).map(i => i.text).join('').trim();
     const files = items.filter(i => i.item?.file).map(i => Object.values(i.item!.file!.workspaceUrisToRelativePaths || {})[0] || i.item!.file!.absoluteUri?.split('/').pop());
-
-    const [isEditing, setIsEditing] = useState(false);
-    const [editText, setEditText] = useState(plainText);
 
     if (!plainText && files.length === 0 && media.length === 0) return null;
     return (

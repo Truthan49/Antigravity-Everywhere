@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('Launch');
@@ -23,7 +23,9 @@ export async function POST(req: Request) {
   log.info({ wsPath }, 'Opening workspace');
 
   try {
-    execSync(`"${ANTIGRAVITY_CLI}" --new-window "${wsPath}"`, {
+    // Security Fix: Prevent Command Injection (RCE) by completely avoiding a shell.
+    // Use execFileSync to pass arguments cleanly.
+    execFileSync(ANTIGRAVITY_CLI, ['--new-window', wsPath], {
       timeout: 5000,
       stdio: 'ignore',
     });
@@ -34,3 +36,4 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
+

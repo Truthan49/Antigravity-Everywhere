@@ -137,7 +137,17 @@ export function grpcCall(opts: GrpcCallOptions): Promise<any> {
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         try {
-          resolve(JSON.parse(data));
+          const parsed = JSON.parse(data);
+          // Connect-specific error structure interception
+          if (parsed && typeof parsed.code === 'string' && typeof parsed.message === 'string') {
+             reject(new Error(`gRPC Error [${parsed.code}]: ${parsed.message}`));
+             return;
+          }
+          if (parsed && parsed.error && typeof parsed.error.code === 'string') {
+             reject(new Error(`gRPC Error [${parsed.error.code}]: ${parsed.error.message || 'unknown'}`));
+             return;
+          }
+          resolve(parsed);
         } catch {
           resolve(data);
         }

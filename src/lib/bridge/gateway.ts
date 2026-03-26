@@ -4,13 +4,14 @@
  */
 import path from 'path';
 import { randomBytes } from 'crypto';
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, readdirSync, statSync } from 'fs';
 import { homedir } from 'os';
 
 import { discoverLanguageServers, getLanguageServer } from './discovery';
 import { getApiKey } from './statedb';
 import * as grpc from './grpc';
 import { createLogger } from '../logger';
+import { getConversations } from './statedb';
 
 const log = createLogger('Gateway');
 
@@ -18,6 +19,89 @@ const log = createLogger('Gateway');
 export { discoverLanguageServers, getLanguageServer } from './discovery';
 export { getApiKey, getUserInfo, getWorkspaces, getPlaygrounds, getConversations, addLocalConversation } from './statedb';
 export * as grpc from './grpc';
+
+export interface ConvCache { id: string; title: string; workspace: string; mtime: number; steps: number; }
+let globalConvCache: ConvCache[] = [];
+
+export async function getDynamicConversations(): Promise<ConvCache[]> {
+  const CONVERSATIONS_DIR = path.join(homedir(), '.gemini/antigravity/conversations');
+  try {
+    const files = readdirSync(CONVERSATIONS_DIR)
+      .filter((f: string) => f.endsWith('.pb'))
+      .map((f: string) => {
+        const id = f.replace('.pb', '');
+        const stat = statSync(path.join(CONVERSATIONS_DIR, f));
+        return { id, mtime: stat.mtimeMs, size: stat.size };
+      })
+      .sort((a: any, b: any) => b.mtime - a.mtime);
+
+    await refreshOwnerMap();
+
+    const sqliteConvs = getConversations();
+    const sqliteMap = new Map<string, any>();
+    sqliteConvs.forEach((c: any) => sqliteMap.set(c.id, c));
+
+    const oldCacheMap = new Map<string, ConvCache>();
+    globalConvCache.forEach(c => oldCacheMap.set(c.id, c));
+
+    const conns = await getAllConnections();
+    const serverTrajectories = new Map<string, Map<string, any>>();
+    for (const conn of conns) {
+      try {
+        const data = await grpc.getAllCascadeTrajectories(conn.port, conn.csrf);
+        const summaries = data?.trajectorySummaries || {};
+        serverTrajectories.set(String(conn.port), new Map(Object.entries(summaries)));
+      } catch { }
+    }
+
+    const results: ConvCache[] = [];
+
+    for (const file of files) {
+      let title = '';
+      let workspace = '';
+      let steps = 0;
+
+      const owner = convOwnerMap.get(file.id);
+      if (owner) {
+        const ownerTraj = serverTrajectories.get(String(owner.port));
+        const live = ownerTraj?.get(file.id);
+        if (live) {
+          title = live.summary || '';
+          if (live.workspaces?.length > 0) {
+            workspace = live.workspaces[0].workspaceFolderAbsoluteUri || '';
+          }
+          steps = live.stepCount || 0;
+        }
+      }
+
+      if (!title) {
+        const lc = oldCacheMap.get(file.id);
+        if (lc?.title) { title = lc.title; workspace = workspace || lc.workspace; steps = Math.max(steps, lc.steps); }
+      }
+
+      const sqliteEntry = sqliteMap.get(file.id);
+      if (!title && sqliteEntry?.title && sqliteEntry.title !== 'Untitled') {
+        title = sqliteEntry.title; workspace = workspace || sqliteEntry.workspace || '';
+        steps = Math.max(steps, sqliteEntry.steps || 0);
+      }
+
+      workspace = workspace || sqliteEntry?.workspace || '';
+      results.push({ id: file.id, title: title || `Conversation ${file.id.slice(0, 8)}`, workspace, mtime: file.mtime, steps });
+    }
+
+    globalConvCache = results;
+    return results;
+  } catch (e: any) {
+    const defaultConvs = getConversations();
+    return defaultConvs.map(c => ({
+      id: c.id,
+      title: c.title,
+      workspace: c.workspace,
+      mtime: 0,
+      steps: c.stepCount || 0
+    }));
+  }
+}
 
 // --- Helper: get all server connections ---
 export async function getAllConnections() {

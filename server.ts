@@ -36,9 +36,68 @@ async function ensureBridge() {
   }
 }
 
-app.prepare().then(() => {
-  const server = createServer((req, res) => {
+  app.prepare().then(() => {
+  const server = createServer(async (req, res) => {
     const parsedUrl = parse(req.url || '', true);
+    
+    // --- Security Fix: Prevent external access to internal routes ---
+    if (parsedUrl.pathname?.startsWith('/_internal/')) {
+      const ip = req.socket.remoteAddress;
+      if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') {
+        log.warn({ ip, path: parsedUrl.pathname }, 'Blocked unauthorized internal access');
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Forbidden IP access' }));
+        return;
+      }
+    }
+
+    // --- Internal HTTP intercepts for Feishu WS Client Management ---
+    // These must run in the main server process, bypassing Next.js API routes (workers)
+    if (parsedUrl.pathname === '/_internal/feishu/restart_global' && req.method === 'POST') {
+      const feishuBot = await import('./src/lib/feishu/bot');
+      const result = await feishuBot.startFeishuClient();
+      res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+      return;
+    }
+    
+    if (parsedUrl.pathname === '/_internal/feishu/restart_workspace' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk.toString());
+      req.on('end', async () => {
+        try {
+          const params = JSON.parse(body);
+          const feishuBot = await import('./src/lib/feishu/bot');
+          if (params.action === 'upsert') {
+            feishuBot.stopWorkspaceBotClient(params.workspaceUri);
+            if (params.enabled) {
+              const r = await feishuBot.startWorkspaceBotClient(params.config);
+              res.writeHead(r.success ? 200 : 400);
+              res.end(JSON.stringify(r));
+              return;
+            }
+          } else if (params.action === 'delete') {
+            feishuBot.stopWorkspaceBotClient(params.workspaceUri);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+      });
+      return;
+    }
+    
+    if (parsedUrl.pathname === '/api/feishu/workspace-bots' && req.method === 'GET') {
+      // Intercept GET to return accurate WS connection status from the main process
+      const feishuBot = await import('./src/lib/feishu/bot');
+      const bots = feishuBot.getWorkspaceBotStatuses();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ bots }));
+      return;
+    }
+
     handle(req, res, parsedUrl);
   });
 
@@ -58,20 +117,35 @@ app.prepare().then(() => {
   wss.on('connection', (ws: WebSocket) => {
     const activeStreams = new Map<string, { abort: () => void; fullSteps: any[] }>();
 
-    function startStreamForId(cascadeId: string, conn: { port: number; csrf: string; workspace?: string }) {
+    function startStreamForId(cascadeId: string, conn: { port: number; csrf: string; apiKey?: string; workspace?: string }) {
 
       // Clean up existing stream for this ID if any
       const existing = activeStreams.get(cascadeId);
       if (existing) { existing.abort(); activeStreams.delete(cascadeId); }
 
       let fullSteps: any[] = [];
+      let abortFn = () => {};
+      activeStreams.set(cascadeId, { abort: () => abortFn(), fullSteps });
 
-      const abort = grpc.streamAgentState(
-        conn.port,
-        conn.csrf,
-        cascadeId,
-        (update: any) => {
-          const stepsUpdate = update?.mainTrajectoryUpdate?.stepsUpdate;
+      (async () => {
+        try {
+          // Force the language server to reload conversation from disk first
+          await grpc.loadTrajectory(conn.port, conn.csrf, cascadeId);
+          const apiKey = conn.apiKey || 'gateway';
+          const hist = await grpc.getTrajectorySteps(conn.port, conn.csrf, apiKey, cascadeId);
+          if (hist && hist.steps) fullSteps = [...hist.steps]; // Hydrate history
+        } catch (e: any) {
+          log.warn({ cascadeId: cascadeId.slice(0,8), err: e.message }, 'History fetch failed');
+        }
+
+        if (!activeStreams.has(cascadeId)) return;
+
+        abortFn = grpc.streamAgentState(
+          conn.port,
+          conn.csrf,
+          cascadeId,
+          (update: any) => {
+            const stepsUpdate = update?.mainTrajectoryUpdate?.stepsUpdate;
           const status = update?.status || '';
           const isActive = status !== 'CASCADE_RUN_STATUS_IDLE';
           const cascadeStatus = status.replace('CASCADE_RUN_STATUS_', '').toLowerCase();
@@ -138,14 +212,26 @@ app.prepare().then(() => {
               if (newOwner) {
                 log.info({ cascadeId: cascadeId.slice(0,8), port: newOwner.port }, 'Stream reconnected');
                 startStreamForId(cascadeId, newOwner);
+              } else {
+                log.warn({ cascadeId: cascadeId.slice(0,8) }, 'No server found during reconnect, retrying in 2s...');
+                // Second attempt after additional delay
+                setTimeout(async () => {
+                  if (ws.readyState === ws.OPEN) {
+                    await gateway.refreshOwnerMap();
+                    const retryOwner = gateway.getOwnerConnection(cascadeId);
+                    if (retryOwner) {
+                      log.info({ cascadeId: cascadeId.slice(0,8), port: retryOwner.port }, 'Stream reconnected (2nd attempt)');
+                      startStreamForId(cascadeId, retryOwner);
+                    }
+                  }
+                }, 2000);
               }
             }
-          }, 2000);
+          }, 500);
         }
       );
-
-      activeStreams.set(cascadeId, { abort, fullSteps });
-    }
+    })();
+  }
 
     ws.on('message', async (raw: Buffer) => {
       try {

@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { readFileSync, existsSync } from 'fs';
+import path from 'path';
+import os from 'os';
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -9,7 +11,21 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'Missing path parameter' }, { status: 400 });
   }
   
-  const absolutePath = pathParam.replace('file://', '');
+  let absolutePath = pathParam.replace('file://', '');
+  
+  // Security Fix: Prevent Local File Inclusion (LFI) / Path Traversal
+  try {
+    absolutePath = path.resolve(absolutePath); // Resolve to absolute path, neutralizing ../
+    
+    const homeDir = os.homedir();
+    // Allow access to the user's home directory (since AI might edit files anywhere in home)
+    if (!absolutePath.startsWith(homeDir)) {
+      console.warn(`[Security] Blocked unauthorized file access: ${absolutePath}`);
+      return NextResponse.json({ error: 'Forbidden path access' }, { status: 403 });
+    }
+  } catch (err) {
+    return NextResponse.json({ error: 'Invalid path format' }, { status: 400 });
+  }
   
   if (!existsSync(absolutePath)) {
     return NextResponse.json({ error: 'File not found' }, { status: 404 });
@@ -17,15 +33,27 @@ export async function GET(req: Request) {
 
   try {
     const fileBuffer = readFileSync(absolutePath);
-    const ext = absolutePath.split('.').pop() || '';
+    const ext = absolutePath.split('.').pop()?.toLowerCase() || '';
     
-    // Guess basic image mime types
-    let contentType = 'application/octet-stream';
-    if (ext.match(/^(jpg|jpeg)$/i)) contentType = 'image/jpeg';
-    else if (ext.match(/^png$/i)) contentType = 'image/png';
-    else if (ext.match(/^gif$/i)) contentType = 'image/gif';
-    else if (ext.match(/^webp$/i)) contentType = 'image/webp';
-    else if (ext.match(/^svg$/i)) contentType = 'image/svg+xml';
+    // Extended MIME types for better browser rendering
+    const mimeTypes: Record<string, string> = {
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg',
+      'png': 'image/png',
+      'gif': 'image/gif',
+      'webp': 'image/webp',
+      'svg': 'image/svg+xml',
+      'pdf': 'application/pdf',
+      'mp4': 'video/mp4',
+      'mp3': 'audio/mpeg',
+      'json': 'application/json',
+      'md': 'text/markdown',
+      'txt': 'text/plain',
+      'js': 'application/javascript',
+      'css': 'text/css'
+    };
+    
+    const contentType = mimeTypes[ext] || 'application/octet-stream';
     
     return new NextResponse(fileBuffer, {
       status: 200,
@@ -38,3 +66,4 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+

@@ -4,8 +4,8 @@
 
 set -e
 
-REPO_URL="https://github.com/pikapikaspeedup/Antigravity-Mobility-CLI.git"
-DEST_DIR="$HOME/Antigravity-Mobility-CLI"
+REPO_URL="https://github.com/Truthan49/Antigravity-Everywhere.git"
+DEST_DIR="$HOME/Antigravity-Everywhere"
 
 echo "================================================"
 echo "🚀 欢迎使用 Antigravity Mobility CLI 一键安装程序"

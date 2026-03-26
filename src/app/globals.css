@@ -1,0 +1,171 @@
+@import "tailwindcss";
+
+@plugin "tailwindcss-animate";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'Fira Code', 'IBM Plex Mono', monospace;
+  
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #09090b;
+  --card: #ffffff;
+  --card-foreground: #09090b;
+  --popover: #ffffff;
+  --popover-foreground: #09090b;
+  --primary: #18181b;
+  --primary-foreground: #fafafa;
+  --secondary: #f4f4f5;
+  --secondary-foreground: #18181b;
+  --muted: #f4f4f5;
+  --muted-foreground: #71717a;
+  --accent: #f4f4f5;
+  --accent-foreground: #18181b;
+  --destructive: #ef4444;
+  --destructive-foreground: #fafafa;
+  --border: #e4e4e7;
+  --input: #e4e4e7;
+  --ring: #18181b;
+  --chart-1: #e76e50;
+  --chart-2: #2a9d8f;
+  --chart-3: #264653;
+  --chart-4: #e9c46a;
+  --chart-5: #f4a261;
+  --radius: 0.6rem;
+}
+
+.dark {
+  /* Slate/Zinc based premium palette */
+  --background: #09090b;
+  --foreground: #fafafa;
+  --card: #09090b;
+  --card-foreground: #fafafa;
+  --popover: #09090b;
+  --popover-foreground: #fafafa;
+  --primary: #fafafa;
+  --primary-foreground: #18181b;
+  --secondary: #27272a;
+  --secondary-foreground: #fafafa;
+  --muted: #27272a;
+  --muted-foreground: #a1a1aa;
+  --accent: #27272a;
+  --accent-foreground: #fafafa;
+  --destructive: #ef4444;
+  --destructive-foreground: #fafafa;
+  --border: #27272a;
+  --input: #27272a;
+  --ring: #d4d4d8;
+  --chart-1: #2563eb;
+  --chart-2: #22c55e;
+  --chart-3: #ff7010;
+  --chart-4: #8b5cf6;
+  --chart-5: #f43f5e;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    overflow: hidden;
+    height: 100dvh;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-muted-foreground/20 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/40;
+}
+
+/* Markdown Polishing */
+.chat-markdown {
+  @apply space-y-4;
+}
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3 {
+  @apply font-bold tracking-tight mt-6 mb-2 first:mt-0;
+}
+.chat-markdown h1 { @apply text-xl; }
+.chat-markdown h2 { @apply text-lg; }
+.chat-markdown h3 { @apply text-base; }
+.chat-markdown p { @apply leading-relaxed; }
+.chat-markdown code {
+  @apply px-1.5 py-0.5 rounded bg-muted font-mono text-sm;
+}
+.chat-markdown pre {
+  @apply shadow-sm rounded-lg overflow-hidden border bg-zinc-950/50 my-4;
+}
+.chat-markdown pre code {
+  @apply block p-4 bg-transparent text-xs leading-relaxed overflow-x-auto;
+}
+.chat-markdown ul, .chat-markdown ol {
+  @apply pl-6 space-y-2;
+}
+.chat-markdown ul { @apply list-disc; }
+.chat-markdown ol { @apply list-decimal; }
+.chat-markdown blockquote {
+  @apply border-l-4 border-muted pl-4 italic text-muted-foreground;
+}
+.chat-markdown a {
+  @apply text-primary underline underline-offset-4 font-medium;
+}
+
+/* Animations */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@utility scrollbar-hide {
+  &::-webkit-scrollbar {
+    display: none;
+  }
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}

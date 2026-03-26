@@ -79,6 +79,18 @@ curl -fsSL https://raw.githubusercontent.com/Truthan49/Antigravity-Everywhere/ma
 
 ---
 
+## 🗑️ 一键彻底卸载 (Uninstall)
+
+如果您需要卸载 Antigravity 并清理所有残留文件，可以打开 Mac / Linux 终端运行下面这行命令：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Truthan49/Antigravity-Everywhere/main/uninstall.sh | bash
+```
+
+*(这会自动引导您安全地清理冗余的项目代码与缓存系统，同时您可以自由选择是否保留历史产生的配置文件供未来恢复时使用。)*
+
+---
+
 ## 🤝 欢迎反馈与参与共建
 
 我们非常欢迎开发者一起探讨 Agent 的未来！如果您在使用期间发现 Bug，或是希望我们接入更多的平台（例如微信企业版/钉钉推送），欢迎提交 Issue 或是发起 Pull Request！

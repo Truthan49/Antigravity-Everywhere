@@ -665,7 +665,7 @@ export default function Sidebar({ activeId, onSelect, onNew, open, onClose, onKn
           handleUnhideWorkspace={handleUnhideWorkspace} handleCloseWorkspace={handleCloseWorkspace} 
           closingWs={closingWs} setCloseTarget={setCloseTarget} setCloseDialogOpen={setCloseDialogOpen} 
           handleLaunchWorkspace={handleLaunchWorkspace} onKnowledgeOpen={onKnowledgeOpen} 
-          onLogsOpen={onLogsOpen} setFeishuConfigOpen={setFeishuConfigOpen} setTunnelConfigOpen={setTunnelConfigOpen}
+          onLogsOpen={onLogsOpen} onBotManagementOpen={onBotManagementOpen} setTunnelConfigOpen={setTunnelConfigOpen}
           setAnalyticsOpen={setAnalyticsOpen} setImportSkillDialogOpen={setImportSkillDialogOpen}
           onStoreOpen={onStoreOpen}
         />

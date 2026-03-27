@@ -36,7 +36,7 @@ interface AssetPanelProps {
   handleLaunchWorkspace: (uri: string) => void;
   onKnowledgeOpen?: () => void;
   onLogsOpen?: () => void;
-  setFeishuConfigOpen: (open: boolean) => void;
+  onBotManagementOpen?: () => void;
   setTunnelConfigOpen: (open: boolean) => void;
   setAnalyticsOpen: (open: boolean) => void;
   setImportSkillDialogOpen: (open: boolean) => void;
@@ -70,7 +70,7 @@ export function AssetPanel({
   handleLaunchWorkspace,
   onKnowledgeOpen,
   onLogsOpen,
-  setFeishuConfigOpen,
+  onBotManagementOpen,
   setTunnelConfigOpen,
   setAnalyticsOpen,
   setImportSkillDialogOpen,
@@ -117,7 +117,14 @@ export function AssetPanel({
             <TabsTrigger value="logs" className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer" onClick={() => onLogsOpen?.()}>
               <Terminal className="w-3 h-3 mr-0.5" />日志
             </TabsTrigger>
-            <TabsTrigger value="feishu" className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer" onClick={() => setFeishuConfigOpen(true)}>
+            <TabsTrigger 
+              value="feishu_fake" 
+              className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                onBotManagementOpen?.();
+              }}
+            >
               <BotMessageSquare className="w-3 h-3 mr-0.5 text-indigo-500" />飞书配置
             </TabsTrigger>
             <TabsTrigger value="tunnel" className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer" onClick={() => setTunnelConfigOpen(true)}>

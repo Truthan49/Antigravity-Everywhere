@@ -98,11 +98,21 @@ export function getWorkspaces(): Array<{ type: 'folder' | 'workspace'; uri: stri
   if (!raw) return [];
   try {
     const data = JSON.parse(raw);
+    const { existsSync } = require('fs');
     return (data.entries || []).map((e: any) => {
       if (e.folderUri) return { type: 'folder' as const, uri: e.folderUri };
       if (e.workspace) return { type: 'workspace' as const, uri: e.workspace.configPath };
       return null;
-    }).filter(Boolean);
+    }).filter((entry: any) => {
+      if (!entry) return false;
+      // Check if the directory still exists on disk
+      try {
+        const fsPath = entry.uri.replace(/^file:\/\//, '');
+        return existsSync(decodeURIComponent(fsPath));
+      } catch {
+        return false;
+      }
+    });
   } catch { return []; }
 }
 

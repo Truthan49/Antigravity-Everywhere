@@ -7,11 +7,14 @@ const log = createLogger('SendMsg');
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id: cascadeId } = await params;
+  let { id: cascadeId } = await params;
   let { text, model, agenticMode = true, attachments } = await req.json();
 
   const conn = await getOwnerConnection(cascadeId);
   if (!conn) return NextResponse.json({ error: 'No server available' }, { status: 503 });
+  
+  // Use the resolved full cascade ID (short IDs like 'd71eb6d5' → full UUID)
+  cascadeId = conn.resolvedCascadeId || cascadeId;
 
   attachments = attachments || {};
   attachments.items = attachments.items || [];

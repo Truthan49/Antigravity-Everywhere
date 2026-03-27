@@ -8,6 +8,7 @@ import { getWorkspaces, getConversations, addLocalConversation, getGlobalModel, 
 import { discoverLanguageServers } from '@/lib/bridge/discovery';
 
 const _feishuAppClients = new Map<string, lark.Client>();
+const processedMsgIds = new Set<string>();
 
 export function getAppClient(appId?: string, appSecret?: string): lark.Client {
   if (!appId || !appSecret) {
@@ -296,6 +297,12 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
       'im.message.receive_v1': async (data: any) => {
         try {
         console.error('[FEISHU_RAW_EVENT_RECEIVED]', JSON.stringify(data).slice(0, 400));
+        const msgId = data?.message?.message_id;
+        if (msgId) {
+          if (processedMsgIds.has(msgId)) return;
+          processedMsgIds.add(msgId);
+          if (processedMsgIds.size > 2000) processedMsgIds.clear(); // max capacity
+        }
         const openId = (data?.sender?.sender_id as any)?.open_id;
         const unionId = (data?.sender?.sender_id as any)?.union_id;
     if (!openId) {
@@ -382,14 +389,11 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
     }
 
     if (lowerText === '/new' || lowerText === '/projects' || lowerText === '/list' || lowerText === '/switch' || lowerText === '/p' || lowerText === '/n') {
-      const wss = getWorkspaces();
-      if (!wss || wss.length === 0) {
-        await sendFeishuText(openId, '当前没有可用的工作区。');
-        return;
-      }
-      const listStr = wss.map((w, i) => `${i + 1}. \`${w.uri.split('/').pop() || w.uri}\``).join('\n');
+      const wss = getWorkspaces() || [];
+      const listStr = wss.length > 0 ? wss.map((w, i) => `${i + 1}. \`${w.uri.split('/').pop() || w.uri}\``).join('\n') + '\n\n' : '';
+      const newOpt = `${wss.length + 1}. ✨ [创建新项目]`;
       feishuStore.updateSession(openId, { state: 'selecting_workspace', workspacesCache: wss.map(w => w.uri) });
-      await sendFeishuText(openId, `请选择工作区编号 (1-${wss.length}):\n\n${listStr}`);
+      await sendFeishuText(openId, `请选择工作区编号 (1-${wss.length + 1}):\n\n${listStr}${newOpt}`);
       return;
     }
 
@@ -457,8 +461,140 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
           // No workspace bots — proceed directly (original flow)
           await handleWorkspaceSelected(openId, wsUri);
         }
+      } else if (!isNaN(idx) && idx === wss.length) {
+        feishuStore.updateSession(openId, { state: 'inputting_new_project_name' });
+        await sendFeishuText(openId, '✨ 请输入新项目的名称（建议使用英文、数字和连字符，如 my-new-app）：');
       } else {
         await sendFeishuText(openId, '编号无效，请重试或发送 /new 重新选择。');
+      }
+      return;
+    }
+
+    if (session.state === 'inputting_new_project_name') {
+      const projectName = text.replace(/[^a-zA-Z0-9-_]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'new-project';
+      feishuStore.updateSession(openId, { state: 'selecting_new_project_mode', pendingProjectName: projectName });
+      await sendFeishuText(openId, `即将创建项目：\`${projectName}\`\n\n请选择研发模式：\n1. 🚀 标准模式 (Standard Workflow)\n2. 📋 GSD 模式 (Get Shit Done - 需求驱动原子化提交)\n3. 🦸 Superpowers 模式 (TDD及子Agent辅助流)`);
+      return;
+    }
+
+    if (session.state === 'selecting_new_project_mode') {
+      const idx = parseInt(text);
+      if (idx === 1 || idx === 2 || idx === 3) {
+        const projectName = session.pendingProjectName || 'new-project';
+        const homePath = require('os').homedir();
+        const projDir = require('path').join(homePath, 'Projects', projectName);
+        
+        await sendFeishuText(openId, `🔄 正在准备工作区：\`${projectName}\`，请稍候...`);
+        
+        try {
+          const fs = require('fs');
+          const cp = require('child_process');
+          const util = require('util');
+          const execAsync = util.promisify(cp.exec);
+
+          fs.mkdirSync(projDir, { recursive: true });
+          cp.execSync('git init', { cwd: projDir, stdio: 'ignore' });
+          
+          const shellEnv = { 
+            ...process.env, 
+            http_proxy: 'http://127.0.0.1:7890', 
+            https_proxy: 'http://127.0.0.1:7890', 
+            all_proxy: 'socks5://127.0.0.1:7890' 
+          };
+          
+          if (idx === 2) {
+            const templateGsd = require('path').join(process.cwd(), 'src/assets/templates/gsd');
+            if (fs.existsSync(templateGsd)) {
+               await sendFeishuText(openId, `📦 正在秒级应用内置 GSD 模式环境...`);
+               fs.cpSync(templateGsd, projDir, { recursive: true });
+            } else {
+               await sendFeishuText(openId, `⚠️ 内置 GSD 模板未找到，正降级为远端实时拉取...\n(受代理影响可能会较慢)`);
+               await execAsync('npx -y get-shit-done-cc@latest --antigravity --local', { cwd: projDir, env: shellEnv, timeout: 60000 });
+            }
+          } else if (idx === 3) {
+            const templateSpSkills = require('path').join(process.cwd(), 'src/assets/templates/superpowers/skills');
+            const targetSpSkills = require('path').join(projDir, '.agent/skills');
+            if (fs.existsSync(templateSpSkills)) {
+               await sendFeishuText(openId, `📦 正在秒级载入内置 Superpowers 工作流...`);
+               fs.mkdirSync(targetSpSkills, { recursive: true });
+               fs.cpSync(templateSpSkills, targetSpSkills, { recursive: true });
+            } else {
+               await sendFeishuText(openId, `⚠️ 内置 Superpowers 模板未找到，正降级为远端实时拉取...\n(受代理影响可能会较慢)`);
+               const agentDir = require('path').join(projDir, '.agent');
+               fs.mkdirSync(agentDir, { recursive: true });
+               await execAsync('git clone -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 --depth 1 https://github.com/obra/superpowers.git skills', { cwd: agentDir, env: shellEnv, timeout: 60000 });
+            }
+          }
+
+          await sendFeishuText(openId, `✅ 项目 \`${projectName}\` (模式 ${idx === 1 ? '标准' : idx === 2 ? 'GSD' : 'Superpowers'}) 已就绪！将尝试为您在 GUI 中打开...`);
+          
+          // Launch it in Antigravity Without Blocking
+          const ANTIGRAVITY_CLI = '/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity';
+          if (fs.existsSync(ANTIGRAVITY_CLI)) {
+            cp.spawn(ANTIGRAVITY_CLI, ['--new-window', projDir], { detached: true, stdio: 'ignore' }).unref();
+          }
+          
+          // Auto-bind: wait for the new language server to come online, then create a cascade
+          const wsUri = `file://${projDir}`;
+          await sendFeishuText(openId, `⏳ 正在等待工作区 \`${projectName}\` 的语言服务就绪...`);
+          
+          let boundSuccess = false;
+          for (let attempt = 0; attempt < 15; attempt++) {
+            await new Promise(r => setTimeout(r, 2000)); // poll every 2s, up to 30s
+            const freshServers = await discoverLanguageServers();
+            const match = freshServers.find(s =>
+              s.workspace?.includes(projDir) || projDir.includes(s.workspace || '\0')
+            );
+            if (match) {
+              try {
+                const { getApiKey } = await import('@/lib/bridge/statedb');
+                const apiKey = getApiKey() || 'gateway';
+                const res = await grpc.startCascade(match.port, match.csrf, apiKey, wsUri);
+                const newId = res.cascadeId;
+                if (newId) {
+                  addLocalConversation(newId, wsUri, '来自飞书的新对话');
+                  feishuStore.updateSession(openId, { state: 'idle', pendingProjectName: undefined, activeCascadeId: newId });
+                  boundSuccess = true;
+                  
+                  // Send a mode-specific activation message to the agent
+                  let activationMsg = '';
+                  if (idx === 2) {
+                    activationMsg = '请按照 GSD (Get Shit Done) 模式初始化此项目。读取 GEMINI.md 和 .agent/ 目录中的技能与工作流配置，然后执行 /gsd-new-project 来引导我完成项目初始化。';
+                  } else if (idx === 3) {
+                    activationMsg = '请按照 Superpowers 模式工作。读取 GEMINI.md 和 .agent/skills/ 目录中的技能配置，然后告诉我你已准备好，并简要说明可用的 Superpowers 技能。';
+                  }
+                  
+                  if (activationMsg) {
+                    try {
+                      await subscribeToAgent(newId, openId);
+                      await grpc.sendMessage(match.port, match.csrf, apiKey, newId, activationMsg);
+                      await sendFeishuText(openId, `🚀 工作区已就绪！正在以 **${idx === 2 ? 'GSD' : 'Superpowers'}** 模式启动，请稍候...`);
+                    } catch (actErr: any) {
+                      console.warn('[Feishu] Mode activation message failed:', actErr.message);
+                      await sendFeishuText(openId, `🚀 工作区已就绪并绑定会话！现在您可以直接发送问题，开始在 \`${projectName}\` 中干活了。`);
+                    }
+                  } else {
+                    await sendFeishuText(openId, `🚀 工作区已就绪并绑定会话！现在您可以直接发送问题，开始在 \`${projectName}\` 中干活了。`);
+                  }
+                }
+              } catch (bindErr: any) {
+                console.warn('[Feishu] Auto-bind cascade failed:', bindErr.message);
+              }
+              break;
+            }
+          }
+          
+          if (!boundSuccess) {
+            feishuStore.updateSession(openId, { state: 'idle', pendingProjectName: undefined, activeCascadeId: undefined });
+            await sendFeishuText(openId, `⚠️ GUI 已打开但语言服务尚未就绪。请等待 Antigravity 窗口加载完成后，发送 /new 选择该工作区开始工作。`);
+          }
+        } catch (e: any) {
+          await sendFeishuText(openId, `❌ 创建失败: ${e.message}`);
+          feishuStore.updateSession(openId, { state: 'idle', pendingProjectName: undefined, activeCascadeId: undefined });
+        }
+
+      } else {
+        await sendFeishuText(openId, '编号无效，请输入 1/2/3 进行选择。');
       }
       return;
     }
@@ -683,6 +819,11 @@ export async function startWorkspaceBotClient(botConfig: WorkspaceBotConfig): Pr
       'im.message.receive_v1': async (data: any) => {
         try {
         console.error(`[FEISHU_WS_BOT] workspace=${wsLabel}`, JSON.stringify(data).slice(0, 300));
+        const msgId = data?.message?.message_id;
+        if (msgId) {
+          if (processedMsgIds.has(msgId)) return;
+          processedMsgIds.add(msgId);
+        }
         const openId = (data?.sender?.sender_id as any)?.open_id;
         if (!openId) return;
 

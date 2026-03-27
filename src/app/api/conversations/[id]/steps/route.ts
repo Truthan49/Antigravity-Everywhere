@@ -4,7 +4,7 @@ import { getOwnerConnection, getAllConnections, refreshOwnerMap, ownerMapAge, gr
 export const dynamic = 'force-dynamic';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id: cascadeId } = await params;
+  let { id: cascadeId } = await params;
   try {
     // Ensure owner map is reasonably fresh (refresh if > 30s old)
     if (Date.now() - ownerMapAge > 30_000) {
@@ -14,6 +14,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     // 1. Try the smart owner connection first (workspace-matched, highest step count)
     let checkpointData: any = null;
     const owner = await getOwnerConnection(cascadeId);
+    // Resolve short IDs to full UUIDs
+    if (owner?.resolvedCascadeId) cascadeId = owner.resolvedCascadeId;
     if (owner) {
       try {
         await grpc.loadTrajectory(owner.port, owner.csrf, cascadeId);

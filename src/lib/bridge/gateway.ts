@@ -139,24 +139,46 @@ export function preRegisterOwner(cascadeId: string, info: OwnerInfo) {
   log.info({ cascadeId: cascadeId.slice(0,8), port: info.port }, 'Pre-registered owner');
 }
 
+/**
+ * Resolve a potentially short cascade ID (e.g. 'd71eb6d5') to its full UUID
+ * by prefix-matching against the convOwnerMap and preRegisteredOwners.
+ */
+export function resolveFullCascadeId(shortOrFullId: string): string {
+  // Already a full UUID (contains dashes and is long enough)
+  if (shortOrFullId.includes('-') && shortOrFullId.length > 30) return shortOrFullId;
+
+  // Prefix match against ownerMap keys
+  for (const key of convOwnerMap.keys()) {
+    if (key.startsWith(shortOrFullId)) return key;
+  }
+  // Prefix match against pre-registered owners
+  for (const key of preRegisteredOwners.keys()) {
+    if (key.startsWith(shortOrFullId)) return key;
+  }
+  return shortOrFullId; // Return as-is if no match found
+}
+
 /** Get the owner server connection for a specific conversation */
 export async function getOwnerConnection(cascadeId: string) {
+  // Auto-resolve short IDs to full UUIDs
+  const resolvedId = resolveFullCascadeId(cascadeId);
+  
   // 1. Check main ownerMap (populated by refreshOwnerMap)
-  const owner = convOwnerMap.get(cascadeId);
+  const owner = convOwnerMap.get(resolvedId);
   if (owner) {
     log.debug({ cascadeId: cascadeId.slice(0,8), port: owner.port, source: 'ownerMap' }, 'Owner lookup');
-    return owner;
+    return { ...owner, resolvedCascadeId: resolvedId };
   }
   // 2. Check pre-registered owners (survives refresh cycles)
-  const preReg = preRegisteredOwners.get(cascadeId);
+  const preReg = preRegisteredOwners.get(resolvedId);
   if (preReg && Date.now() - preReg.registeredAt < PRE_REG_TTL_MS) {
     log.debug({ cascadeId: cascadeId.slice(0,8), port: preReg.port, source: 'pre-reg', ageSec: Math.round((Date.now() - preReg.registeredAt)/1000) }, 'Owner lookup');
-    return preReg;
+    return { ...preReg, resolvedCascadeId: resolvedId };
   }
   // 3. Fallback
   const conns = await getAllConnections();
   log.debug({ cascadeId: cascadeId.slice(0,8), serverCount: conns.length, source: 'fallback' }, 'Owner lookup fallback');
-  return conns.length > 0 ? conns[0] : null;
+  return conns.length > 0 ? { ...conns[0], resolvedCascadeId: resolvedId } : null;
 }
 
 /** Refresh the owner map from all servers */

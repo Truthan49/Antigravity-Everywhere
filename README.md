@@ -163,6 +163,25 @@ npm run dev
 
 ---
 
+## 🔄 更新到最新版本
+
+```bash
+cd ~/Antigravity-Everywhere && git pull origin main && npm install && npm run dev
+```
+
+> 如果你使用的是后台服务模式（通过 install.sh 安装），更新后需要重启服务：
+
+```bash
+cd ~/Antigravity-Everywhere && git pull origin main && npm install
+# 重启后台服务
+launchctl stop com.antigravity.gateway 2>/dev/null
+launchctl start com.antigravity.gateway 2>/dev/null
+# 或直接前台运行
+npm run dev
+```
+
+---
+
 ## ⚙️ 配置指南
 
 ### 飞书机器人

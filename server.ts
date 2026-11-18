@@ -21,6 +21,14 @@ if (!process.env.INTERNAL_ACCESS_TOKEN) {
 
 const log = createLogger('Server');
 
+process.on('unhandledRejection', (reason: any) => {
+  log.error({ err: reason?.message || String(reason), stack: reason?.stack }, 'Unhandled promise rejection');
+});
+
+process.on('uncaughtException', (err: Error) => {
+  log.error({ err: err.message, stack: err.stack }, 'Uncaught exception');
+});
+
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = '0.0.0.0';
 const port = parseInt(process.env.PORT || '3000');
@@ -123,6 +131,10 @@ async function ensureBridge() {
     const activeStreams = new Map<string, { abort: () => void; fullSteps: any[] }>();
 
     function startStreamForId(cascadeId: string, conn: { port: number; csrf: string; apiKey?: string; workspace?: string }) {
+      if (!conn || !conn.port || !conn.csrf) {
+        log.warn({ cascadeId: cascadeId.slice(0, 8) }, 'Skipping stream start: invalid server connection');
+        return;
+      }
 
       // Clean up existing stream for this ID if any
       const existing = activeStreams.get(cascadeId);
@@ -134,117 +146,123 @@ async function ensureBridge() {
 
       (async () => {
         try {
-          // Force the language server to reload conversation from disk first
-          await grpc.loadTrajectory(conn.port, conn.csrf, cascadeId);
-          const apiKey = conn.apiKey || 'gateway';
-          const hist = await grpc.getTrajectorySteps(conn.port, conn.csrf, apiKey, cascadeId);
-          if (hist && hist.steps) fullSteps = [...hist.steps]; // Hydrate history
-        } catch (e: any) {
-          log.warn({ cascadeId: cascadeId.slice(0,8), err: e.message }, 'History fetch failed');
-        }
-
-        if (!activeStreams.has(cascadeId)) return;
-
-        abortFn = grpc.streamAgentState(
-          conn.port,
-          conn.csrf,
-          cascadeId,
-          (update: any) => {
-            const stepsUpdate = update?.mainTrajectoryUpdate?.stepsUpdate;
-          const status = update?.status || '';
-          const isActive = status !== 'CASCADE_RUN_STATUS_IDLE';
-          const cascadeStatus = status.replace('CASCADE_RUN_STATUS_', '').toLowerCase();
-
-          // Extract latest task boundary for progress panel
-          let lastTaskBoundary: any = null;
-          const allSteps = stepsUpdate?.steps || [];
-          for (let i = allSteps.length - 1; i >= 0; i--) {
-            if (allSteps[i]?.type === 'CORTEX_STEP_TYPE_TASK_BOUNDARY') {
-              lastTaskBoundary = allSteps[i].taskBoundary;
-              break;
-            }
+          try {
+            // Force the language server to reload conversation from disk first
+            await grpc.loadTrajectory(conn.port, conn.csrf, cascadeId);
+            const apiKey = conn.apiKey || 'gateway';
+            const hist = await grpc.getTrajectorySteps(conn.port, conn.csrf, apiKey, cascadeId);
+            if (hist && hist.steps) fullSteps = [...hist.steps]; // Hydrate history
+          } catch (e: any) {
+            log.warn({ cascadeId: cascadeId.slice(0,8), err: e.message }, 'History fetch failed');
           }
 
-          if (stepsUpdate?.steps?.length) {
-            const indices: number[] = stepsUpdate.indices || [];
-            const newSteps: any[] = stepsUpdate.steps || [];
-            const totalLength: number = stepsUpdate.totalLength || 0;
+          if (!activeStreams.has(cascadeId) || ws.readyState !== ws.OPEN) return;
 
-            if (indices.length > 0 && indices.length === newSteps.length) {
-              if (totalLength > fullSteps.length) {
-                fullSteps.length = totalLength;
-              }
-              for (let i = 0; i < indices.length; i++) {
-                fullSteps[indices[i]] = newSteps[i];
-              }
-            } else if (newSteps.length > fullSteps.length) {
-              fullSteps = [...newSteps];
-            } else if (newSteps.length === fullSteps.length) {
-              fullSteps = [...newSteps];
-            }
+          abortFn = grpc.streamAgentState(
+            conn.port,
+            conn.csrf,
+            cascadeId,
+            (update: any) => {
+              if (ws.readyState !== ws.OPEN) return;
+              const stepsUpdate = update?.mainTrajectoryUpdate?.stepsUpdate;
+              const status = update?.status || '';
+              const isActive = status !== 'CASCADE_RUN_STATUS_IDLE';
+              const cascadeStatus = status.replace('CASCADE_RUN_STATUS_', '').toLowerCase();
 
-            // Search fullSteps for latest task boundary (more reliable)
-            for (let i = fullSteps.length - 1; i >= 0; i--) {
-              if (fullSteps[i]?.type === 'CORTEX_STEP_TYPE_TASK_BOUNDARY') {
-                lastTaskBoundary = fullSteps[i].taskBoundary;
-                break;
-              }
-            }
-
-            const cleanSteps = fullSteps.filter(s => s != null);
-            ws.send(JSON.stringify({
-              type: 'steps', cascadeId, data: { steps: cleanSteps }, isActive, cascadeStatus,
-              totalLength: stepsUpdate.totalLength || cleanSteps.length,
-              lastTaskBoundary,
-              workspace: conn.workspace,
-            }));
-          } else {
-            ws.send(JSON.stringify({
-              type: 'status', cascadeId, isActive, cascadeStatus,
-              stepCount: fullSteps.filter(s => s != null).length,
-              lastTaskBoundary,
-              workspace: conn.workspace,
-            }));
-          }
-        },
-        async (err: Error) => {
-          log.warn({ cascadeId: cascadeId.slice(0,8), err: err.message }, 'Stream ended, reconnecting...');
-          setTimeout(async () => {
-            try {
-              if (ws.readyState === ws.OPEN) {
-                await ensureBridge();
-                await gateway.refreshOwnerMap();
-                const newOwner = gateway.getOwnerConnection(cascadeId);
-                if (newOwner) {
-                  log.info({ cascadeId: cascadeId.slice(0,8), port: newOwner.port }, 'Stream reconnected');
-                  startStreamForId(cascadeId, newOwner);
-                } else {
-                  log.warn({ cascadeId: cascadeId.slice(0,8) }, 'No server found during reconnect, retrying in 2s...');
-                  // Second attempt after additional delay
-                  setTimeout(async () => {
-                    try {
-                      if (ws.readyState === ws.OPEN) {
-                        await gateway.refreshOwnerMap();
-                        const retryOwner = gateway.getOwnerConnection(cascadeId);
-                        if (retryOwner) {
-                          log.info({ cascadeId: cascadeId.slice(0,8), port: retryOwner.port }, 'Stream reconnected (2nd attempt)');
-                          startStreamForId(cascadeId, retryOwner);
-                        }
-                      }
-                    } catch (e: any) {
-                      log.error({ cascadeId: cascadeId.slice(0,8), err: e.message }, 'Stream reconnect (2nd attempt) failed');
-                    }
-                  }, 2000);
+              // Extract latest task boundary for progress panel
+              let lastTaskBoundary: any = null;
+              const allSteps = stepsUpdate?.steps || [];
+              for (let i = allSteps.length - 1; i >= 0; i--) {
+                if (allSteps[i]?.type === 'CORTEX_STEP_TYPE_TASK_BOUNDARY') {
+                  lastTaskBoundary = allSteps[i].taskBoundary;
+                  break;
                 }
               }
-            } catch (e: any) {
-              log.error({ cascadeId: cascadeId.slice(0,8), err: e.message }, 'Stream reconnect failed');
+
+              if (stepsUpdate?.steps?.length) {
+                const indices: number[] = stepsUpdate.indices || [];
+                const newSteps: any[] = stepsUpdate.steps || [];
+                const totalLength: number = stepsUpdate.totalLength || 0;
+
+                if (indices.length > 0 && indices.length === newSteps.length) {
+                  if (totalLength > fullSteps.length) {
+                    fullSteps.length = totalLength;
+                  }
+                  for (let i = 0; i < indices.length; i++) {
+                    fullSteps[indices[i]] = newSteps[i];
+                  }
+                } else if (newSteps.length > fullSteps.length) {
+                  fullSteps = [...newSteps];
+                } else if (newSteps.length === fullSteps.length) {
+                  fullSteps = [...newSteps];
+                }
+
+                // Search fullSteps for latest task boundary (more reliable)
+                for (let i = fullSteps.length - 1; i >= 0; i--) {
+                  if (fullSteps[i]?.type === 'CORTEX_STEP_TYPE_TASK_BOUNDARY') {
+                    lastTaskBoundary = fullSteps[i].taskBoundary;
+                    break;
+                  }
+                }
+
+                const cleanSteps = fullSteps.filter(s => s != null);
+                ws.send(JSON.stringify({
+                  type: 'steps', cascadeId, data: { steps: cleanSteps }, isActive, cascadeStatus,
+                  totalLength: stepsUpdate.totalLength || cleanSteps.length,
+                  lastTaskBoundary,
+                  workspace: conn.workspace,
+                }));
+              } else {
+                ws.send(JSON.stringify({
+                  type: 'status', cascadeId, isActive, cascadeStatus,
+                  stepCount: fullSteps.filter(s => s != null).length,
+                  lastTaskBoundary,
+                  workspace: conn.workspace,
+                }));
+              }
+            },
+            async (err: Error) => {
+              log.warn({ cascadeId: cascadeId.slice(0,8), err: err.message }, 'Stream ended, reconnecting...');
+              setTimeout(async () => {
+                try {
+                  if (ws.readyState === ws.OPEN && activeStreams.has(cascadeId)) {
+                    await ensureBridge();
+                    await gateway.refreshOwnerMap();
+                    const newOwner = await gateway.getOwnerConnection(cascadeId);
+                    if (newOwner) {
+                      log.info({ cascadeId: cascadeId.slice(0,8), port: newOwner.port }, 'Stream reconnected');
+                      startStreamForId(cascadeId, newOwner);
+                    } else {
+                      log.warn({ cascadeId: cascadeId.slice(0,8) }, 'No server found during reconnect, retrying in 2s...');
+                      // Second attempt after additional delay
+                      setTimeout(async () => {
+                        try {
+                          if (ws.readyState === ws.OPEN && activeStreams.has(cascadeId)) {
+                            await gateway.refreshOwnerMap();
+                            const retryOwner = await gateway.getOwnerConnection(cascadeId);
+                            if (retryOwner) {
+                              log.info({ cascadeId: cascadeId.slice(0,8), port: retryOwner.port }, 'Stream reconnected (2nd attempt)');
+                              startStreamForId(cascadeId, retryOwner);
+                            }
+                          }
+                        } catch (e: any) {
+                          log.error({ cascadeId: cascadeId.slice(0,8), err: e.message }, 'Stream reconnect (2nd attempt) failed');
+                        }
+                      }, 2000);
+                    }
+                  }
+                } catch (e: any) {
+                  log.error({ cascadeId: cascadeId.slice(0,8), err: e.message }, 'Stream reconnect failed');
+                }
+              }, 500);
             }
-          }, 500);
+          );
+        } catch (e: any) {
+          log.error({ cascadeId: cascadeId.slice(0, 8), err: e.message }, 'Failed to start stream');
+          activeStreams.delete(cascadeId);
         }
-      );
-    })();
-  }
+      })();
+    }
 
     ws.on('message', async (raw: Buffer) => {
       try {
@@ -262,7 +280,7 @@ async function ensureBridge() {
             await gateway.refreshOwnerMap();
           }
 
-          const owner = gateway.getOwnerConnection(cascadeId);
+          const owner = await gateway.getOwnerConnection(cascadeId);
           if (!owner) {
             ws.send(JSON.stringify({ type: 'error', message: 'No server found for this conversation' }));
             return;
@@ -278,7 +296,7 @@ async function ensureBridge() {
           }
           for (const cascadeId of msg.cascadeIds) {
             if (activeStreams.has(cascadeId)) continue; // already streaming
-            const owner = gateway.getOwnerConnection(cascadeId);
+            const owner = await gateway.getOwnerConnection(cascadeId);
             if (owner) {
               log.info({ cascadeId: cascadeId.slice(0,8), port: owner.port }, 'Multi-subscribe');
               startStreamForId(cascadeId, owner);

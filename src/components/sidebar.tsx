@@ -30,6 +30,7 @@ interface SidebarProps {
   activeId: string | null;
   onSelect: (id: string, title: string, workspace: string) => void;
   onNew: (workspace: string) => void;
+  onDeleted?: (deletedIds: string[]) => void;
   open: boolean;
   onClose: () => void;
   onKnowledgeOpen?: () => void;
@@ -43,10 +44,11 @@ function getWorkspaceName(uri: string) {
   if (!uri) return 'Other';
   if (uri.includes('/playground/')) return 'Playground';
   const parts = uri.replace('file://', '').split('/');
-  return parts[parts.length - 1] || parts[parts.length - 2] || uri;
+  const raw = parts[parts.length - 1] || parts[parts.length - 2] || uri;
+  try { return decodeURIComponent(raw); } catch { return raw; }
 }
 
-export default function Sidebar({ activeId, onSelect, onNew, open, onClose, onKnowledgeOpen, onLogsOpen, onStoreOpen, onBotManagementOpen, activeCascadeIds = new Set() }: SidebarProps) {
+export default function Sidebar({ activeId, onSelect, onNew, onDeleted, open, onClose, onKnowledgeOpen, onLogsOpen, onStoreOpen, onBotManagementOpen, activeCascadeIds = new Set() }: SidebarProps) {
   const [user, setUser] = useState<UserInfo | null>(null);
   const [pinned, setPinned] = useState<string[]>([]);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
@@ -106,16 +108,46 @@ export default function Sidebar({ activeId, onSelect, onNew, open, onClose, onKn
     if (selectedConversations.size === 0) return;
     if (!window.confirm(`确定要删除选中的 ${selectedConversations.size} 个对话吗？\n删除后不可恢复。`)) return;
     
+    const ids = Array.from(selectedConversations);
     try {
       await fetch('/api/conversations/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'delete', ids: Array.from(selectedConversations) })
+        body: JSON.stringify({ action: 'delete', ids })
       });
       setSelectedConversations(new Set());
       setIsBatchMode(false);
+      setPinned(prev => {
+        const next = prev.filter(p => !ids.includes(p));
+        localStorage.setItem('antigravity_pinned_chats', JSON.stringify(next));
+        return next;
+      });
+      onDeleted?.(ids);
       load();
     } catch { }
+  };
+
+  const handleDeleteOne = async (e: React.MouseEvent, id: string, title: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.confirm(`确定要删除对话「${title}」吗？\n删除后不可恢复。`)) return;
+
+    try {
+      const res = await fetch('/api/conversations/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', ids: [id] })
+      });
+      if (res.ok) {
+        setPinned(prev => {
+          const next = prev.filter(p => p !== id);
+          localStorage.setItem('antigravity_pinned_chats', JSON.stringify(next));
+          return next;
+        });
+        onDeleted?.([id]);
+        load();
+      }
+    } catch {}
   };
 
   useEffect(() => {
@@ -521,17 +553,18 @@ export default function Sidebar({ activeId, onSelect, onNew, open, onClose, onKn
 
   const wsOptions = (() => {
     const allWs = new Map<string, { name: string; running: boolean; hidden: boolean }>();
+    const hasHub = servers.some(s => !s.workspace);
     servers.forEach(s => {
       const ws = s.workspace || '';
       if (!ws || ws.includes('/playground/')) return;
       const isHidden = hiddenWorkspaces.some(h => ws === h || ws.includes(h) || h.includes(ws));
-      allWs.set(ws, { name: ws.replace('file://', '').split('/').pop() || ws, running: true, hidden: isHidden });
+      allWs.set(ws, { name: getWorkspaceName(ws), running: true, hidden: isHidden });
     });
     workspaces.forEach(w => {
       const uri = w.uri || '';
       if (!uri || allWs.has(uri) || uri.includes('/playground/')) return;
       const isHidden = hiddenWorkspaces.some(h => uri === h || uri.includes(h) || h.includes(uri));
-      allWs.set(uri, { name: uri.replace('file://', '').split('/').pop() || uri, running: false, hidden: isHidden });
+      allWs.set(uri, { name: getWorkspaceName(uri), running: hasHub, hidden: isHidden });
     });
     return [...allWs.entries()].sort((a, b) => {
       if (a[1].hidden !== b[1].hidden) return a[1].hidden ? 1 : -1;
@@ -540,11 +573,12 @@ export default function Sidebar({ activeId, onSelect, onNew, open, onClose, onKn
     });
   })();
 
-  // Filter out hidden and non-running workspaces from conversation list
+  // Filter out hidden workspaces from conversation list; only filter by running server in legacy per-workspace mode
+  const hasHubOrDisconnected = servers.length === 0 || servers.some(s => !s.workspace);
   const visibleConversations = conversations.filter(c => {
     const ws = c.workspace || '';
     if (isWsHidden(ws)) return false;
-    if (!ws || ws === 'playground') return true;
+    if (!ws || ws === 'playground' || hasHubOrDisconnected) return true;
     return isWsRunning(ws);
   });
 
@@ -649,7 +683,7 @@ export default function Sidebar({ activeId, onSelect, onNew, open, onClose, onKn
           activeId={activeId} collapsed={collapsed} activeCascadeIds={activeCascadeIds} 
           onSelect={(id, title, workspace) => { onSelect(id, title, workspace); onClose(); }} onClose={onClose} 
           toggleBatchMode={toggleBatchMode} toggleSelectConversation={toggleSelectConversation} 
-          handleBatchDelete={handleBatchDelete} togglePin={togglePin} 
+          handleBatchDelete={handleBatchDelete} handleDeleteOne={handleDeleteOne} togglePin={togglePin} 
           setCollapsed={setCollapsed} setSelectedConversations={setSelectedConversations}
         />
         

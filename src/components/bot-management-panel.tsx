@@ -31,12 +31,13 @@ interface WorkspaceBotStatus {
 }
 
 function getWsName(uri: string) {
-  return uri.replace('file://', '').split('/').pop() || uri;
+  const raw = uri.replace('file://', '').split('/').pop() || uri;
+  try { return decodeURIComponent(raw); } catch { return raw; }
 }
 
 export default function BotManagementPanel({ open, onClose }: BotManagementPanelProps) {
   // Global bot state
-  const [globalConfig, setGlobalConfig] = useState({ appId: '', appSecret: '' });
+  const [globalConfig, setGlobalConfig] = useState({ appId: '', appSecret: '', showThoughts: false });
   const [globalModel, setGlobalModel] = useState('');
   const [globalSaving, setGlobalSaving] = useState(false);
   const [globalMsg, setGlobalMsg] = useState('');
@@ -69,11 +70,16 @@ export default function BotManagementPanel({ open, onClose }: BotManagementPanel
       ]);
       setModels((modelsData as any).clientModelConfigs || []);
       setGlobalModel((modelsData as any).globalPreferredModel || localStorage.getItem('antigravity_selected_model') || '');
-      setGlobalConfig({ appId: configData.appId || '', appSecret: configData.appSecret || '' });
+      setGlobalConfig({
+        appId: configData.appId || '',
+        appSecret: configData.appSecret || '',
+        showThoughts: Boolean(configData.showThoughts),
+      });
       setWsBots(botsData.bots || []);
 
       // Build workspace list from servers + workspaces
       const wsMap = new Map<string, { name: string; running: boolean }>();
+      const hasHub = (serversData as ServerType[]).some(s => !s.workspace);
       (serversData as ServerType[]).forEach(s => {
         const ws = s.workspace || '';
         if (!ws || ws.includes('/playground/')) return;
@@ -82,7 +88,7 @@ export default function BotManagementPanel({ open, onClose }: BotManagementPanel
       ((wsData as any).workspaces as Workspace[] || []).forEach(w => {
         const uri = w.uri || '';
         if (!uri || wsMap.has(uri) || uri.includes('/playground/')) return;
-        wsMap.set(uri, { name: getWsName(uri), running: false });
+        wsMap.set(uri, { name: getWsName(uri), running: hasHub });
       });
       setAvailableWorkspaces(
         [...wsMap.entries()]
@@ -538,6 +544,41 @@ export default function BotManagementPanel({ open, onClose }: BotManagementPanel
                       </SelectContent>
                     </Select>
                     <p className="text-[10px] text-muted-foreground">全局模型影响所有未指定独立模型的机器人，同时也同步到 Web UI 的模型选择。</p>
+                  </div>
+
+                  {/* Show Thoughts Toggle */}
+                  <div className="flex items-center justify-between gap-4 p-3 rounded-lg border bg-muted/20">
+                    <div className="space-y-0.5">
+                      <div className="text-xs font-semibold">显示 AI 思考过程</div>
+                      <p className="text-[10px] text-muted-foreground">开启后飞书卡片会实时输出 &lt;thought&gt; 推理过程（也可在飞书发送 /think 切换）。</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={globalConfig.showThoughts}
+                      onClick={async () => {
+                        const next = !globalConfig.showThoughts;
+                        setGlobalConfig(prev => ({ ...prev, showThoughts: next }));
+                        try {
+                          await api.updateFeishuConfig({ showThoughts: next });
+                          setGlobalMsg(next ? '💭 已开启飞书思考过程' : '🙈 已关闭飞书思考过程');
+                          setTimeout(() => setGlobalMsg(''), 3000);
+                        } catch (e: any) {
+                          setGlobalMsg(`❌ ${e.message}`);
+                        }
+                      }}
+                      className={cn(
+                        'relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors',
+                        globalConfig.showThoughts ? 'bg-emerald-500' : 'bg-muted-foreground/30'
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'pointer-events-none block h-4 w-4 rounded-full bg-white shadow-sm transition-transform',
+                          globalConfig.showThoughts ? 'translate-x-4' : 'translate-x-0'
+                        )}
+                      />
+                    </button>
                   </div>
 
                   <div className="flex items-center gap-3">

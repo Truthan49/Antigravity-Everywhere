@@ -24,7 +24,16 @@ export async function GET(req: Request) {
     // Get all .pb files safely using Node.js
     const files = fs.readdirSync(convDir).filter(f => f.endsWith('.pb'));
     if (files.length === 0) {
-      return NextResponse.json({ results: [] });
+      // Antigravity 2.0 stores conversations in conversation_summaries.db / *.db
+      const { readConversationSummariesDb } = await import('@/lib/bridge/statedb');
+      const needle = q.trim().toLowerCase();
+      const summaryMatches = readConversationSummariesDb()
+        .filter(s => !s.killed && (s.title.toLowerCase().includes(needle) || s.preview.toLowerCase().includes(needle)))
+        .map(s => ({
+          id: s.id,
+          snippets: [s.title || s.preview].filter(Boolean),
+        }));
+      return NextResponse.json({ success: true, results: summaryMatches });
     }
 
     // Use child_process.execFile to safely pass user input as an argument.

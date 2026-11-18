@@ -35,27 +35,27 @@ export async function GET() {
       // Parse dates
       const createdTime = c.createdAt ? new Date(c.createdAt).getTime() : 0;
       
-      // Compute estimated tokens using .pb file size if available
+      // Compute estimated tokens using .pb or .db file size if available
       try {
-        const stat = fs.statSync(path.join(CONV_DIR, `${c.id}.pb`));
-        // PB files contain full text history. English 1 char=1 byte≈0.25 tokens. Chinese 1 char=3 bytes≈1 token (0.33 tokens/byte).
-        // A rough constant of 0.3 tokens per byte of the .pb payload.
-        const fileTokens = Math.round(stat.size * 0.3);
+        const pbPath = path.join(CONV_DIR, `${c.id}.pb`);
+        const dbPath = path.join(CONV_DIR, `${c.id}.db`);
+        const statPath = fs.existsSync(pbPath) ? pbPath : (fs.existsSync(dbPath) ? dbPath : '');
+        const fileSize = statPath ? fs.statSync(statPath).size : 0;
+        const fileTokens = Math.round(fileSize * 0.3);
+        const estimatedSteps = c.stepCount && c.stepCount > 0 ? c.stepCount : Math.max(1, Math.round(fileSize / 10000));
+        const effectiveTime = createdTime || now;
         
-        // Estimate steps if missing or zero (approx 10000 bytes/step as fallback)
-        const estimatedSteps = c.stepCount && c.stepCount > 0 ? c.stepCount : Math.max(1, Math.round(stat.size / 10000));
-        
-        if (createdTime > thirtyDaysAgo) {
+        if (effectiveTime > thirtyDaysAgo) {
           totalEstimatedTokens += fileTokens;
           activeConvsLast30Days++;
           newStepsLast30Days += estimatedSteps;
         }
 
-        if (createdTime > sevenDaysAgo) {
+        if (effectiveTime > sevenDaysAgo) {
           newConvsLast7Days++;
         }
 
-        const dateStr = new Date(createdTime).toISOString().split('T')[0];
+        const dateStr = new Date(effectiveTime).toISOString().split('T')[0];
         if (heatmap[dateStr] !== undefined) {
           heatmap[dateStr] += estimatedSteps; 
         }
@@ -90,7 +90,9 @@ export async function GET() {
       feishuUsers = Object.keys(fd).length;
     } catch {}
 
-    const workspacesCount = getWorkspaces().length;
+    const wsSet = new Set<string>(getWorkspaces().map(w => w.uri).filter(Boolean));
+    convs.forEach(c => { if (c.workspace) wsSet.add(c.workspace); });
+    const workspacesCount = wsSet.size;
     
     let skillsCount = 0;
     try {

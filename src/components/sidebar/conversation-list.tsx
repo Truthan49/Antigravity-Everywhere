@@ -21,6 +21,7 @@ interface ConversationListProps {
   toggleBatchMode: () => void;
   toggleSelectConversation: (id: string, e: React.MouseEvent) => void;
   handleBatchDelete: () => void;
+  handleDeleteOne: (e: React.MouseEvent, id: string, title: string) => void;
   togglePin: (e: React.MouseEvent, id: string) => void;
   setCollapsed: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   setSelectedConversations: React.Dispatch<React.SetStateAction<Set<string>>>;
@@ -41,6 +42,7 @@ export function ConversationList({
   toggleBatchMode,
   toggleSelectConversation,
   handleBatchDelete,
+  handleDeleteOne,
   togglePin,
   setCollapsed,
   setSelectedConversations
@@ -121,12 +123,21 @@ export function ConversationList({
                         <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
                       </span>
                     )}
-                    <div 
-                      className="opacity-0 group-hover:opacity-100 transition-opacity ml-auto shrink-0 p-1 rounded-sm hover:bg-muted-foreground/20 text-muted-foreground hover:text-foreground z-10 cursor-pointer"
-                      onClick={(e) => togglePin(e, c.id)}
-                      title="取消置顶"
-                    >
-                      <PinOff className="w-3.5 h-3.5" />
+                    <div className="opacity-0 group-hover:opacity-100 transition-opacity ml-auto shrink-0 flex items-center gap-0.5 z-10">
+                      <div
+                        className="p-1 rounded-sm hover:bg-muted-foreground/20 text-muted-foreground hover:text-foreground cursor-pointer"
+                        onClick={(e) => togglePin(e, c.id)}
+                        title="取消置顶"
+                      >
+                        <PinOff className="w-3.5 h-3.5" />
+                      </div>
+                      <div
+                        className="p-1 rounded-sm hover:bg-destructive/15 text-muted-foreground hover:text-destructive cursor-pointer"
+                        onClick={(e) => handleDeleteOne(e, c.id, c.title || '未命名')}
+                        title="删除对话"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -176,12 +187,24 @@ export function ConversationList({
                           <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
                         </span>
                       )}
-                      <div 
-                        className="opacity-0 group-hover:opacity-100 transition-opacity ml-auto shrink-0 p-1 rounded-sm hover:bg-muted-foreground/20 text-muted-foreground hover:text-foreground z-10 cursor-pointer"
-                        onClick={(e) => togglePin(e, c.id)}
-                      >
-                        <Pin className="w-3.5 h-3.5" />
-                      </div>
+                      {!isBatchMode && (
+                        <div className="opacity-0 group-hover:opacity-100 transition-opacity ml-auto shrink-0 flex items-center gap-0.5 z-10">
+                          <div
+                            className="p-1 rounded-sm hover:bg-muted-foreground/20 text-muted-foreground hover:text-foreground cursor-pointer"
+                            onClick={(e) => togglePin(e, c.id)}
+                            title="置顶对话"
+                          >
+                            <Pin className="w-3.5 h-3.5" />
+                          </div>
+                          <div
+                            className="p-1 rounded-sm hover:bg-destructive/15 text-muted-foreground hover:text-destructive cursor-pointer"
+                            onClick={(e) => handleDeleteOne(e, c.id, c.title || '未命名')}
+                            title="删除对话"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

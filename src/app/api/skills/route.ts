@@ -65,7 +65,11 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: 'Missing parameters' }, { status: 400 });
       }
       
-      const wsPath = workspaceUri.replace(/^file:\/\//, '');
+      let wsPath = workspaceUri.replace(/^file:\/\//, '');
+      try { wsPath = decodeURIComponent(wsPath); } catch {}
+      if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(wsPath)) {
+        wsPath = wsPath.slice(1);
+      }
       const skillName = path.basename(sourceBaseDir);
       const targetDir = path.join(wsPath, '.agents', 'skills', skillName);
       
@@ -132,7 +136,18 @@ export async function POST(req: Request) {
         fs.writeFileSync(tmpZipPath, Buffer.from(arrayBuffer));
         
         fs.mkdirSync(targetDir, { recursive: true });
-        execSync(`unzip -q -o "${tmpZipPath}" -d "${targetDir}"`, { stdio: 'ignore' });
+        try {
+          execSync(`tar -xf "${tmpZipPath}" -C "${targetDir}"`, { stdio: 'ignore' });
+        } catch {
+          if (process.platform === 'win32') {
+            execSync(
+              `powershell -NoProfile -NonInteractive -Command "Expand-Archive -LiteralPath '${tmpZipPath.replace(/'/g, "''")}' -DestinationPath '${targetDir.replace(/'/g, "''")}' -Force"`,
+              { stdio: 'ignore' }
+            );
+          } else {
+            execSync(`unzip -q -o "${tmpZipPath}" -d "${targetDir}"`, { stdio: 'ignore' });
+          }
+        }
         
         return NextResponse.json({ success: true, targetDir });
       } catch (e: any) {

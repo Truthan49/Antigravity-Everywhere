@@ -1,6 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { existsSync } from 'fs';
+import https from 'https';
 import { createLogger } from '../logger';
 
 const execAsync = promisify(exec);
@@ -17,7 +18,8 @@ export interface LanguageServerInfo {
 // Cache to avoid running ps aux + lsof on every single API request
 let _cachedServers: LanguageServerInfo[] = [];
 let _cacheTime = 0;
-const CACHE_TTL_MS = 3000; // 3 seconds
+const CACHE_TTL_MS = 10000; // 10 seconds
+let _inFlightDiscovery: Promise<LanguageServerInfo[]> | null = null;
 
 /**
  * Decode Antigravity's workspace_id back to a real file:// URI.
@@ -79,6 +81,95 @@ function decodeWorkspaceId(wsId: string): string | undefined {
   return 'file://' + resolvedPath.replace(/\/$/, '');
 }
 
+function probeHttpsPort(port: number, csrf: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = https.request(
+      {
+        hostname: '127.0.0.1',
+        port,
+        path: '/exa.language_server_pb.LanguageServerService/GetUserStatus',
+        method: 'POST',
+        rejectUnauthorized: false,
+        timeout: 1500,
+        headers: {
+          'Content-Type': 'application/json',
+          'Connect-Protocol-Version': '1',
+          'x-codeium-csrf-token': csrf,
+        },
+      },
+      (res) => {
+        res.resume();
+        resolve((res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 500);
+      },
+    );
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.write('{}');
+    req.end();
+  });
+}
+
+async function discoverWindowsServers(): Promise<LanguageServerInfo[]> {
+  const servers: LanguageServerInfo[] = [];
+  try {
+    const psScript = [
+      "$procs = Get-CimInstance Win32_Process -Filter \"Name='language_server.exe'\" | Where-Object { $_.CommandLine -match 'csrf_token' };",
+      '$result = @();',
+      'foreach ($p in $procs) {',
+      '  $ports = @(Get-NetTCPConnection -OwningProcess $p.ProcessId -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort);',
+      '  $result += [PSCustomObject]@{ pid = $p.ProcessId; cmd = $p.CommandLine; ports = $ports };',
+      '};',
+      '$result | ConvertTo-Json -Compress -Depth 3',
+    ].join(' ');
+
+    const { stdout } = await execAsync(
+      `powershell -NoProfile -NonInteractive -Command "${psScript.replace(/"/g, '\\"')}"`,
+      { encoding: 'utf-8', timeout: 15000 },
+    );
+
+    const trimmed = stdout.trim();
+    if (!trimmed || trimmed === 'null') return [];
+    const parsed = JSON.parse(trimmed);
+    const items: Array<{ pid: number; cmd: string; ports: number[] | number }> = Array.isArray(parsed)
+      ? parsed
+      : [parsed];
+
+    for (const item of items) {
+      const cmd = item.cmd || '';
+      const csrfMatch = cmd.match(/--csrf_token[=\s]+(\S+)/);
+      if (!csrfMatch) continue;
+      const csrf = csrfMatch[1];
+
+      const ports = Array.isArray(item.ports)
+        ? item.ports
+        : typeof item.ports === 'number'
+          ? [item.ports]
+          : [];
+      const uniquePorts = [...new Set(ports.filter((p) => p > 0))];
+      if (uniquePorts.length === 0) continue;
+
+      let httpsPort = 0;
+      for (const candidate of uniquePorts) {
+        if (await probeHttpsPort(candidate, csrf)) {
+          httpsPort = candidate;
+          break;
+        }
+      }
+      if (!httpsPort) continue;
+
+      const wsMatch = cmd.match(/--workspace_id[=\s]+(\S+)/);
+      const workspace = wsMatch?.[1] ? decodeWorkspaceId(wsMatch[1]) : undefined;
+      servers.push({ pid: item.pid, port: httpsPort, csrf, workspace });
+    }
+  } catch (err) {
+    log.debug({ err }, 'Windows language_server discovery failed');
+  }
+  return servers;
+}
+
 /**
  * Discover all running language_server instances with their ports and CSRF tokens.
  * Results are cached for 3 seconds to avoid expensive shell commands on every request.
@@ -87,59 +178,77 @@ export async function discoverLanguageServers(): Promise<LanguageServerInfo[]> {
   if (Date.now() - _cacheTime < CACHE_TTL_MS && _cachedServers.length > 0) {
     return _cachedServers;
   }
-
-  const servers: LanguageServerInfo[] = [];
-
-  try {
-    // Step 1: Get all language_server processes with their CSRF tokens + workspace
-    let psOutput = '';
-    try {
-      const psRes = await execAsync('ps aux', { encoding: 'utf-8', timeout: 5000 });
-      psOutput = psRes.stdout;
-    } catch {}
-    
-    const psLines = psOutput.split('\n').filter(l => l.includes('language_server') && l.includes('--csrf_token'));
-
-    // Step 2: Get all TCP LISTEN ports globally (once, not per-PID)
-    let lsofOutput = '';
-    try {
-      const lsofRes = await execAsync('lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null', { encoding: 'utf-8', timeout: 10000 });
-      lsofOutput = lsofRes.stdout;
-    } catch {}
-
-    for (const line of psLines) {
-      const pidMatch = line.match(/^\S+\s+(\d+)/);
-      const csrfMatch = line.match(/--csrf_token[=\s]+(\S+)/);
-      if (!pidMatch || !csrfMatch) continue;
-
-      const pid = parseInt(pidMatch[1]);
-      const csrf = csrfMatch[1];
-
-      // Find the first LISTEN port for this specific PID from lsof
-      let port = 0;
-      const pidRegex = new RegExp(`^language_\\S*\\s+${pid}\\s+.*:(\\d{4,5})\\s+\\(LISTEN\\)`, 'm');
-      const portMatch = lsofOutput.match(pidRegex);
-      if (portMatch) {
-        port = parseInt(portMatch[1]);
-      }
-
-      if (port === 0) continue;
-
-      // Extract and decode workspace ID from args
-      const wsMatch = line.match(/--workspace_id[=\s]+(\S+)/);
-      const workspace = wsMatch?.[1] ? decodeWorkspaceId(wsMatch[1]) : undefined;
-
-      servers.push({ pid, port, csrf, workspace });
-    }
-  } catch { /* ps failed */ }
-
-  if (servers.length !== _cachedServers.length || servers.some((s, i) => s.port !== _cachedServers[i]?.port)) {
-    log.info({ count: servers.length, servers: servers.map(s => `pid=${s.pid} port=${s.port} ws="${s.workspace}"`).join(' | ') }, 'Servers discovered');
+  if (_inFlightDiscovery) {
+    return _inFlightDiscovery;
   }
 
-  _cachedServers = servers;
-  _cacheTime = Date.now();
-  return servers;
+  _inFlightDiscovery = (async () => {
+    let servers: LanguageServerInfo[] = [];
+
+    if (process.platform === 'win32') {
+      servers = await discoverWindowsServers();
+      if (servers.length === 0 && _cachedServers.length > 0) {
+        return _cachedServers;
+      }
+    } else {
+      try {
+        // Step 1: Get all language_server processes with their CSRF tokens + workspace
+        let psOutput = '';
+        try {
+          const psRes = await execAsync('ps aux', { encoding: 'utf-8', timeout: 5000 });
+          psOutput = psRes.stdout;
+        } catch {}
+        
+        const psLines = psOutput.split('\n').filter(l => l.includes('language_server') && l.includes('--csrf_token'));
+
+        // Step 2: Get all TCP LISTEN ports globally (once, not per-PID)
+        let lsofOutput = '';
+        try {
+          const lsofRes = await execAsync('lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null', { encoding: 'utf-8', timeout: 10000 });
+          lsofOutput = lsofRes.stdout;
+        } catch {}
+
+        for (const line of psLines) {
+          const pidMatch = line.match(/^\S+\s+(\d+)/);
+          const csrfMatch = line.match(/--csrf_token[=\s]+(\S+)/);
+          if (!pidMatch || !csrfMatch) continue;
+
+          const pid = parseInt(pidMatch[1]);
+          const csrf = csrfMatch[1];
+
+          // Find the first LISTEN port for this specific PID from lsof
+          let port = 0;
+          const pidRegex = new RegExp(`^language_\\S*\\s+${pid}\\s+.*:(\\d{4,5})\\s+\\(LISTEN\\)`, 'm');
+          const portMatch = lsofOutput.match(pidRegex);
+          if (portMatch) {
+            port = parseInt(portMatch[1]);
+          }
+
+          if (port === 0) continue;
+
+          // Extract and decode workspace ID from args
+          const wsMatch = line.match(/--workspace_id[=\s]+(\S+)/);
+          const workspace = wsMatch?.[1] ? decodeWorkspaceId(wsMatch[1]) : undefined;
+
+          servers.push({ pid, port, csrf, workspace });
+        }
+      } catch { /* ps failed */ }
+    }
+
+    if (servers.length !== _cachedServers.length || servers.some((s, i) => s.port !== _cachedServers[i]?.port)) {
+      log.info({ count: servers.length, servers: servers.map(s => `pid=${s.pid} port=${s.port} ws="${s.workspace}"`).join(' | ') }, 'Servers discovered');
+    }
+
+    _cachedServers = servers;
+    _cacheTime = Date.now();
+    return servers;
+  })();
+
+  try {
+    return await _inFlightDiscovery;
+  } finally {
+    _inFlightDiscovery = null;
+  }
 }
 
 /**

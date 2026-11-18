@@ -8,16 +8,22 @@ import { mkdirSync, existsSync, readdirSync, statSync } from 'fs';
 import { homedir } from 'os';
 
 import { discoverLanguageServers, getLanguageServer } from './discovery';
-import { getApiKey } from './statedb';
 import * as grpc from './grpc';
 import { createLogger } from '../logger';
-import { getConversations } from './statedb';
+import {
+  getApiKey,
+  getConversations,
+  readConversationSummariesDb,
+  readLocalCache,
+  normalizeWorkspaceUri,
+  isPlaceholderTitle,
+} from './statedb';
 
 const log = createLogger('Gateway');
 
 // Re-export bridge modules for convenience
 export { discoverLanguageServers, getLanguageServer } from './discovery';
-export { getApiKey, getUserInfo, getWorkspaces, getPlaygrounds, getConversations, addLocalConversation } from './statedb';
+export { getApiKey, getUserInfo, getWorkspaces, getPlaygrounds, getConversations, addLocalConversation, normalizeWorkspaceUri } from './statedb';
 export * as grpc from './grpc';
 
 export interface ConvCache { id: string; title: string; workspace: string; mtime: number; steps: number; }
@@ -26,69 +32,138 @@ let globalConvCache: ConvCache[] = [];
 export async function getDynamicConversations(): Promise<ConvCache[]> {
   const CONVERSATIONS_DIR = path.join(homedir(), '.gemini/antigravity/conversations');
   try {
-    const files = readdirSync(CONVERSATIONS_DIR)
-      .filter((f: string) => f.endsWith('.pb'))
-      .map((f: string) => {
-        const id = f.replace('.pb', '');
-        const stat = statSync(path.join(CONVERSATIONS_DIR, f));
-        return { id, mtime: stat.mtimeMs, size: stat.size };
-      })
-      .sort((a: any, b: any) => b.mtime - a.mtime);
+    const fileMap = new Map<string, { id: string; mtime: number; size: number }>();
+    if (existsSync(CONVERSATIONS_DIR)) {
+      for (const f of readdirSync(CONVERSATIONS_DIR)) {
+        if (!f.endsWith('.pb') && !f.endsWith('.db')) continue;
+        const id = f.replace(/\.(pb|db)$/, '');
+        if (!id || !id.includes('-') || id.length <= 30) continue;
+        const fullPath = path.join(CONVERSATIONS_DIR, f);
+        const stat = statSync(fullPath);
+        let mtime = stat.mtimeMs;
+        if (f.endsWith('.db')) {
+          const walPath = fullPath + '-wal';
+          if (existsSync(walPath)) {
+            try { mtime = Math.max(mtime, statSync(walPath).mtimeMs); } catch {}
+          }
+        }
+        const prev = fileMap.get(id);
+        if (!prev || mtime > prev.mtime) {
+          fileMap.set(id, { id, mtime, size: stat.size });
+        }
+      }
+    }
 
     await refreshOwnerMap();
+
+    const summaryRows = readConversationSummariesDb();
+    const summaryMap = new Map(summaryRows.map(s => [s.id, s]));
 
     const sqliteConvs = getConversations();
     const sqliteMap = new Map<string, any>();
     sqliteConvs.forEach((c: any) => sqliteMap.set(c.id, c));
+
+    const localCache = readLocalCache();
+    const localMap = new Map(localCache.map(c => [c.id, c]));
 
     const oldCacheMap = new Map<string, ConvCache>();
     globalConvCache.forEach(c => oldCacheMap.set(c.id, c));
 
     const conns = await getAllConnections();
     const serverTrajectories = new Map<string, Map<string, any>>();
+    const allLiveTrajectories = new Map<string, any>();
     for (const conn of conns) {
       try {
         const data = await grpc.getAllCascadeTrajectories(conn.port, conn.csrf);
         const summaries = data?.trajectorySummaries || {};
         serverTrajectories.set(String(conn.port), new Map(Object.entries(summaries)));
+        for (const [tid, live] of Object.entries(summaries)) {
+          allLiveTrajectories.set(tid, live);
+        }
       } catch { }
     }
 
+    const allIds = new Set<string>([
+      ...fileMap.keys(),
+      ...summaryMap.keys(),
+      ...allLiveTrajectories.keys(),
+      ...localMap.keys(),
+      ...sqliteMap.keys(),
+    ]);
+
     const results: ConvCache[] = [];
 
-    for (const file of files) {
+    for (const id of allIds) {
+      const summary = summaryMap.get(id);
+      const owner = convOwnerMap.get(id);
+      const ownerTraj = owner ? serverTrajectories.get(String(owner.port)) : undefined;
+      const live = ownerTraj?.get(id) || allLiveTrajectories.get(id);
+
+      // Skip old killed subagents and internal child subagent trajectories
+      if (summary?.killed && !live) continue;
+      if (summary?.parentId) continue;
+
+      const fileInfo = fileMap.get(id);
+      const sqliteEntry = sqliteMap.get(id);
+      const localEntry = localMap.get(id);
+      const oldEntry = oldCacheMap.get(id);
+
       let title = '';
       let workspace = '';
       let steps = 0;
+      let mtime = fileInfo?.mtime || 0;
 
-      const owner = convOwnerMap.get(file.id);
-      if (owner) {
-        const ownerTraj = serverTrajectories.get(String(owner.port));
-        const live = ownerTraj?.get(file.id);
-        if (live) {
-          title = live.summary || '';
-          if (live.workspaces?.length > 0) {
-            workspace = live.workspaces[0].workspaceFolderAbsoluteUri || '';
-          }
-          steps = live.stepCount || 0;
+      if (live) {
+        title = live.summary || live.annotations?.title || '';
+        if (live.workspaces?.length > 0) {
+          workspace = normalizeWorkspaceUri(live.workspaces[0].workspaceFolderAbsoluteUri || '');
         }
+        steps = live.stepCount || 0;
+        const liveMtime = live.lastModifiedTime ? Date.parse(live.lastModifiedTime) || 0 : 0;
+        if (liveMtime > mtime) mtime = liveMtime;
       }
 
-      if (!title) {
-        const lc = oldCacheMap.get(file.id);
-        if (lc?.title) { title = lc.title; workspace = workspace || lc.workspace; steps = Math.max(steps, lc.steps); }
+      if (summary) {
+        const summaryTitle = summary.title || summary.preview || '';
+        if (isPlaceholderTitle(title) && summaryTitle) title = summaryTitle;
+        if (!workspace && summary.workspace) workspace = summary.workspace;
+        steps = Math.max(steps, summary.stepCount || 0);
+        if (summary.mtimeMs > mtime) mtime = summary.mtimeMs;
       }
 
-      const sqliteEntry = sqliteMap.get(file.id);
-      if (!title && sqliteEntry?.title && sqliteEntry.title !== 'Untitled') {
-        title = sqliteEntry.title; workspace = workspace || sqliteEntry.workspace || '';
-        steps = Math.max(steps, sqliteEntry.steps || 0);
+      if (isPlaceholderTitle(title) && oldEntry?.title && !isPlaceholderTitle(oldEntry.title)) {
+        title = oldEntry.title;
+      }
+      if (!workspace && oldEntry?.workspace) workspace = normalizeWorkspaceUri(oldEntry.workspace);
+      if (oldEntry?.steps) steps = Math.max(steps, oldEntry.steps);
+
+      if (sqliteEntry) {
+        if (isPlaceholderTitle(title) && sqliteEntry.title && !isPlaceholderTitle(sqliteEntry.title)) {
+          title = sqliteEntry.title;
+        }
+        if (!workspace && sqliteEntry.workspace) workspace = normalizeWorkspaceUri(sqliteEntry.workspace);
+        steps = Math.max(steps, sqliteEntry.stepCount || sqliteEntry.steps || 0);
+        const createdMs = sqliteEntry.createdAt ? Date.parse(sqliteEntry.createdAt) || 0 : 0;
+        if (createdMs > mtime) mtime = createdMs;
       }
 
-      workspace = workspace || sqliteEntry?.workspace || '';
-      results.push({ id: file.id, title: title || `Conversation ${file.id.slice(0, 8)}`, workspace, mtime: file.mtime, steps });
+      if (localEntry) {
+        if (isPlaceholderTitle(title) && localEntry.title) title = localEntry.title;
+        if (!workspace && localEntry.workspace) workspace = normalizeWorkspaceUri(localEntry.workspace);
+        const localMs = localEntry.createdAt ? Date.parse(localEntry.createdAt) || 0 : 0;
+        if (localMs > mtime) mtime = localMs;
+      }
+
+      results.push({
+        id,
+        title: title || `Conversation ${id.slice(0, 8)}`,
+        workspace: normalizeWorkspaceUri(workspace),
+        mtime,
+        steps,
+      });
     }
 
+    results.sort((a, b) => b.mtime - a.mtime);
     globalConvCache = results;
     return results;
   } catch (e: any) {
@@ -96,8 +171,8 @@ export async function getDynamicConversations(): Promise<ConvCache[]> {
     return defaultConvs.map(c => ({
       id: c.id,
       title: c.title,
-      workspace: c.workspace,
-      mtime: 0,
+      workspace: normalizeWorkspaceUri(c.workspace || ''),
+      mtime: c.createdAt ? Date.parse(c.createdAt) || 0 : 0,
       steps: c.stepCount || 0
     }));
   }

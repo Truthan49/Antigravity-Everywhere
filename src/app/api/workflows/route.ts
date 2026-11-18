@@ -45,9 +45,25 @@ export async function GET() {
   }
 }
 
+function uriToFsPath(uriOrPath: string): string {
+  let p = uriOrPath.replace(/^file:\/\//, '');
+  try { p = decodeURIComponent(p); } catch {}
+  if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(p)) {
+    p = p.slice(1);
+  }
+  return p;
+}
+
 const openFileInEditor = (pathToOpen: string) => {
   exec(`code "${pathToOpen}"`, (err: Error | null) => {
-    if (err) exec(`open "${pathToOpen}"`);
+    if (!err) return;
+    if (process.platform === 'win32') {
+      exec(`cmd /c start "" "${pathToOpen}"`);
+    } else if (process.platform === 'darwin') {
+      exec(`open "${pathToOpen}"`);
+    } else {
+      exec(`xdg-open "${pathToOpen}"`);
+    }
   });
 };
 
@@ -60,7 +76,7 @@ export async function POST(req: Request) {
       const { workspace, name, description } = body;
       if (!workspace || !name) throw new Error('Workspace and name are required');
 
-      const wsPath = workspace.replace('file://', '');
+      const wsPath = uriToFsPath(workspace);
       const workflowsDir = path.join(wsPath, '.agents', 'workflows');
       if (!existsSync(workflowsDir)) mkdirSync(workflowsDir, { recursive: true });
 
@@ -83,14 +99,14 @@ Write your workflow steps here...
     }
 
     if (action === 'open') {
-      const { filepath } = body;
+      const filepath = body.filepath ? uriToFsPath(body.filepath) : '';
       if (!filepath || !existsSync(filepath)) throw new Error('File not found at: ' + filepath);
       openFileInEditor(filepath);
       return NextResponse.json({ success: true });
     }
 
     if (action === 'promote') {
-      const { filepath } = body;
+      const filepath = body.filepath ? uriToFsPath(body.filepath) : '';
       if (!filepath || !existsSync(filepath)) throw new Error('File not found at: ' + filepath);
 
       const globalDir = path.join(homedir(), '.agents', 'workflows');
@@ -106,7 +122,7 @@ Write your workflow steps here...
     }
 
     if (action === 'delete') {
-      const { filepath } = body;
+      const filepath = body.filepath ? uriToFsPath(body.filepath) : '';
       if (!filepath || !existsSync(filepath)) throw new Error('File not found at: ' + filepath);
       rmSync(filepath);
       return NextResponse.json({ success: true });

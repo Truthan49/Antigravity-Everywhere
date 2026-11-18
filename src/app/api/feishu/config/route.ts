@@ -13,10 +13,22 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const config = await req.json();
+    const prev = feishuConfigStore.get();
+    const nextAppId = config.appId !== undefined ? (config.appId || '') : prev.appId;
+    const nextAppSecret = config.appSecret !== undefined ? (config.appSecret || '') : prev.appSecret;
+    const nextShowThoughts = config.showThoughts !== undefined ? Boolean(config.showThoughts) : Boolean(prev.showThoughts);
+
     feishuConfigStore.set({
-      appId: config.appId || '',
-      appSecret: config.appSecret || ''
+      appId: nextAppId,
+      appSecret: nextAppSecret,
+      showThoughts: nextShowThoughts,
     });
+
+    // Only restart the WebSocket client when credentials changed or explicitly requested
+    const credentialsChanged = nextAppId !== prev.appId || nextAppSecret !== prev.appSecret;
+    if (!credentialsChanged && config.showThoughts !== undefined && !config.restart) {
+      return NextResponse.json({ ok: true });
+    }
 
     // Call the custom server to start/restart the WebSocket client 
     // This avoids spawning long-lived WebSockets inside the ephemeral Next.js API worker.

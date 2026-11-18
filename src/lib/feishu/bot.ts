@@ -2,7 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { feishuStore } from './store';
 import { feishuConfigStore, workspaceBotStore } from './config';
 import type { WorkspaceBotConfig } from './config';
-import { getOwnerConnection, refreshOwnerMap, convOwnerMap, tryAllServers, getAllConnections, getDynamicConversations } from '@/lib/bridge/gateway';
+import { getOwnerConnection, refreshOwnerMap, convOwnerMap, tryAllServers, getAllConnections, getDynamicConversations, normalizeWorkspaceUri } from '@/lib/bridge/gateway';
 import * as grpc from '@/lib/bridge/grpc';
 import { getWorkspaces, getConversations, addLocalConversation, getGlobalModel, setGlobalModel } from '@/lib/bridge/statedb';
 import { discoverLanguageServers } from '@/lib/bridge/discovery';
@@ -60,7 +60,9 @@ async function updateFeishuText(messageId: string, text: string, appId?: string,
       path: { message_id: messageId },
       data: { content: buildCard(text) }
     });
-    console.error(`[FEISHU_PATCH_RES] ID=${messageId} -> HTTP ${res.code} ${res.msg}`);
+    if (res.code && res.code !== 0) {
+      console.warn(`[FEISHU_PATCH_RES] ID=${messageId} -> HTTP ${res.code} ${res.msg}`);
+    }
   } catch (e) {
     console.error(`[FEISHU_PATCH_EXCEPTION] ID=${messageId} ->`, e);
   }
@@ -132,6 +134,51 @@ async function handleWorkspaceSelected(openId: string, wsUri: string) {
 // Global active streams to prevent multiple listeners per cascadeId
 const activeStreams = new Map<string, () => void>();
 
+function extractStepExecutionSummary(step: any): string {
+  const shortName = (uriOrPath?: string) => {
+    if (!uriOrPath) return '';
+    const clean = uriOrPath.replace(/^file:\/\//, '');
+    const parts = clean.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] || clean;
+  };
+
+  if (step.taskBoundary?.taskName) {
+    return `🧭 阶段：${step.taskBoundary.taskName}${step.taskBoundary.taskStatus ? `（${step.taskBoundary.taskStatus}）` : ''}`;
+  }
+  if (step.viewFile?.absolutePathUri) {
+    return `📄 读取文件 \`${shortName(step.viewFile.absolutePathUri)}\``;
+  }
+  if (step.codeAction) {
+    const uri =
+      step.codeAction.actionSpec?.createFile?.path?.absoluteUri ||
+      step.codeAction.actionSpec?.editFile?.path?.absoluteUri ||
+      step.codeAction.actionResult?.edit?.absoluteUri ||
+      step.codeAction.targetFile;
+    return `✏️ 修改文件 \`${shortName(uri) || 'file'}\``;
+  }
+  if (step.runCommand?.commandLine) {
+    const cmd = String(step.runCommand.commandLine).trim().slice(0, 60);
+    return `💻 执行命令 \`${cmd}\``;
+  }
+  if (step.grepSearch?.query) {
+    return `🔍 搜索 \`${String(step.grepSearch.query).slice(0, 40)}\``;
+  }
+  if (step.findByName?.pattern) {
+    return `🔎 查找文件 \`${String(step.findByName.pattern).slice(0, 40)}\``;
+  }
+  if (step.listDirectory?.directoryPathUri) {
+    return `📁 浏览目录 \`${shortName(step.listDirectory.directoryPathUri)}\``;
+  }
+  if (step.plannerResponse?.toolCalls?.length) {
+    const names = step.plannerResponse.toolCalls
+      .map((t: any) => t?.name || t?.toolName)
+      .filter(Boolean)
+      .join(', ');
+    if (names) return `🛠️ 调用工具：\`${names}\``;
+  }
+  return '';
+}
+
 export async function subscribeToAgent(cascadeId: string, feishuOpenId: string, targetAppId?: string, targetAppSecret?: string): Promise<void> {
   return new Promise(async (resolveSub) => {
     if (activeStreams.has(cascadeId)) {
@@ -150,11 +197,13 @@ export async function subscribeToAgent(cascadeId: string, feishuOpenId: string, 
   let isThinking = true;
 
   // We immediately create a placeholder message in Feishu
-  sendFeishuText(feishuOpenId, '⏳ 思考中...', targetAppId, targetAppSecret).then(msgId => {
-    replyMessageId = msgId;
-  });
+  sendFeishuText(feishuOpenId, '⏳ 思考中...', targetAppId, targetAppSecret)
+    .then(msgId => { replyMessageId = msgId; })
+    .catch(err => { console.warn('[Feishu] Placeholder send failed:', err?.message || err); });
 
   const updateFeishu = async () => {
+    const showThoughts = Boolean(feishuConfigStore.get().showThoughts);
+
     // Find the latest user input so we don't repeat history
     let lastUserInputIndex = -1;
     for (let i = fullSteps.length - 1; i >= 0; i--) {
@@ -165,13 +214,39 @@ export async function subscribeToAgent(cascadeId: string, feishuOpenId: string, 
     }
 
     let text = '';
+    const execLines: string[] = [];
+    let latestThinking = '';
+
     for (let i = lastUserInputIndex + 1; i < fullSteps.length; i++) {
       const step = fullSteps[i];
       if (!step) continue;
+
+      if (showThoughts) {
+        const execSummary = extractStepExecutionSummary(step);
+        if (execSummary) execLines.push(execSummary);
+      }
+
       if (step.notifyUser?.notificationContent) {
         text += step.notifyUser.notificationContent + '\n\n';
       } else if (step.plannerResponse) {
         const rawText = step.plannerResponse.modifiedResponse || step.plannerResponse.response || '';
+        if (showThoughts) {
+          const thoughtParts: string[] = [];
+          if (typeof step.plannerResponse.thinking === 'string' && step.plannerResponse.thinking.trim()) {
+            thoughtParts.push(step.plannerResponse.thinking.trim());
+          }
+          if (typeof step.plannerResponse.thought === 'string' && step.plannerResponse.thought.trim()) {
+            thoughtParts.push(step.plannerResponse.thought.trim());
+          }
+          const thoughtRegex = /<thought>([\s\S]*?)(?:<\/thought>|$)/g;
+          let m: RegExpExecArray | null;
+          while ((m = thoughtRegex.exec(rawText)) !== null) {
+            if (m[1].trim()) thoughtParts.push(m[1].trim());
+          }
+          if (thoughtParts.length > 0) {
+            latestThinking = thoughtParts.join('\n\n');
+          }
+        }
         const cleanText = rawText.replace(/<thought>[\s\S]*?(?:<\/thought>|$)/g, '').trim();
         if (cleanText) text += cleanText + '\n\n';
       }
@@ -179,7 +254,22 @@ export async function subscribeToAgent(cascadeId: string, feishuOpenId: string, 
         text += '❌ ' + (step.errorMessage.message || step.errorMessage.errorMessage) + '\n\n';
       }
     }
-    text = text.trim();
+
+    let combined = '';
+    if (showThoughts && latestThinking) {
+      const trimmedThought = latestThinking.length > 1000 ? '...\n' + latestThinking.slice(-1000) : latestThinking;
+      const quotedThought = trimmedThought.split('\n').map(l => `> ${l}`).join('\n');
+      combined += `> 💭 **思考过程**\n${quotedThought}\n\n`;
+    }
+    if (showThoughts && execLines.length > 0) {
+      const recentExec = execLines.slice(-10);
+      const prefix = execLines.length > 10 ? `> *(已省略前 ${execLines.length - 10} 步)*\n` : '';
+      combined += `> ⚙️ **执行过程**\n${prefix}${recentExec.map(l => `> - ${l}`).join('\n')}\n\n`;
+    }
+    if (text.trim()) {
+      combined += text.trim();
+    }
+    text = combined.trim();
 
     if (!replyMessageId) return; // Wait for Feishu to allocate the bubble before discarding diffs!
     if (!text && isThinking) return;
@@ -187,13 +277,16 @@ export async function subscribeToAgent(cascadeId: string, feishuOpenId: string, 
 
     lastSentText = text;
     const displayText = text || '等待输入...';
-    console.error(`[FEISHU_TEXT_PATCH] ID=${replyMessageId} text_len=${text.length} -> "${displayText.slice(0, 50)}..."`);
+    console.log(`[FEISHU_TEXT_PATCH] ID=${replyMessageId} text_len=${text.length} -> "${displayText.slice(0, 50)}..."`);
     await updateFeishuText(replyMessageId, displayText + (isThinking ? ' ⏳' : ''), targetAppId, targetAppSecret);
   };
 
-  const timer = setInterval(updateFeishu, 1500); // 1.5s interval to avoid Feishu rate limits
+  const timer = setInterval(() => { updateFeishu().catch(() => {}); }, 1500); // 1.5s interval to avoid Feishu rate limits
 
   let hasTransitionedToRunning = false;
+
+  // Ensure historical conversations are loaded from disk before subscribing
+  await grpc.loadTrajectory(conn.port, conn.csrf, cascadeId).catch(() => {});
 
   const abort = grpc.streamAgentState(
     conn.port,
@@ -210,16 +303,17 @@ export async function subscribeToAgent(cascadeId: string, feishuOpenId: string, 
         hasTransitionedToRunning = true;
       }
 
-      if ((status === 'CASCADE_RUN_STATUS_DONE' || status === 'CASCADE_RUN_STATUS_ERROR') && hasTransitionedToRunning) {
+      if ((status === 'CASCADE_RUN_STATUS_DONE' || status === 'CASCADE_RUN_STATUS_IDLE' || status === 'CASCADE_RUN_STATUS_ERROR') && hasTransitionedToRunning) {
         if (isThinking) {
           isThinking = false;
           clearInterval(timer);
-          updateFeishu();
+          updateFeishu().catch(() => {});
           
           setTimeout(() => {
-             // Optional Feishu broadcast hook upon completion
-             const statusText = status === 'CASCADE_RUN_STATUS_DONE' ? '✅ 任务执行完毕' : '❌ 任务执行出错';
-             sendFeishuText(feishuOpenId, `🔔 [Gateway 提醒]\n会话 ${cascadeId.slice(0, 8)} ${statusText}。`, targetAppId, targetAppSecret);
+             if (status === 'CASCADE_RUN_STATUS_ERROR') {
+               sendFeishuText(feishuOpenId, `🔔 [Gateway 提醒]\n会话 ${cascadeId.slice(0, 8)} ❌ 任务执行出错。`, targetAppId, targetAppSecret)
+                 .catch(err => console.warn('[Feishu] Error notice failed:', err?.message || err));
+             }
              
              // MEMORY LEAK FIX: Ensure we deregister the cleanup hook permanently!
              if (activeStreams.has(cascadeId)) {
@@ -240,7 +334,7 @@ export async function subscribeToAgent(cascadeId: string, feishuOpenId: string, 
         } else if (newSteps.length >= fullSteps.length) {
           fullSteps = [...newSteps];
         }
-        console.error(`[STREAM_UPDATE] fullSteps len=${fullSteps.length}`);
+        console.log(`[STREAM_UPDATE] fullSteps len=${fullSteps.length}`);
       }
     },
     (err: Error) => {
@@ -296,7 +390,7 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
     const eventDispatcher = new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data: any) => {
         try {
-        console.error('[FEISHU_RAW_EVENT_RECEIVED]', JSON.stringify(data).slice(0, 400));
+        console.log('[FEISHU_RAW_EVENT_RECEIVED]', JSON.stringify(data).slice(0, 400));
         const msgId = data?.message?.message_id;
         if (msgId) {
           if (processedMsgIds.has(msgId)) return;
@@ -331,6 +425,7 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
 📁 /new, /p —— 查看并切换工作区 (自动提供历史会话或新建)
 🕰️ /history, /h —— 恢复近期的历史会话
 🧠 /model, /m —— 切换全局默认 AI 模型
+💭 /think —— 开启/关闭在飞书中显示 AI 思考过程
 📊 /usage, /u —— 查询这 30 天的总 Token 消耗量
 💡 /help, /? —— 查看此帮助信息
 
@@ -338,7 +433,16 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
 
     const lowerText = text.toLowerCase();
 
-    if (lowerText === '/help' || lowerText === '帮助' || lowerText === '/h' || lowerText === '/?' || lowerText === '?' || lowerText === 'help') {
+    if (lowerText === '/think' || lowerText === '/thought' || lowerText === '/think on' || lowerText === '/think off') {
+      const current = Boolean(feishuConfigStore.get().showThoughts);
+      const next = lowerText.endsWith(' on') ? true : lowerText.endsWith(' off') ? false : !current;
+      const prevCfg = feishuConfigStore.get();
+      feishuConfigStore.set({ ...prevCfg, showThoughts: next });
+      await sendFeishuText(openId, next ? '💭 已**开启**飞书端显示 AI 思考过程（与 Web 控制台同步）。' : '🙈 已**关闭**飞书端显示 AI 思考过程（仅显示最终回复）。');
+      return;
+    }
+
+    if (lowerText === '/help' || lowerText === '帮助' || lowerText === '/?' || lowerText === '?' || lowerText === 'help') {
       await sendFeishuText(openId, helpContent);
       return;
     }
@@ -389,15 +493,43 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
     }
 
     if (lowerText === '/new' || lowerText === '/projects' || lowerText === '/list' || lowerText === '/switch' || lowerText === '/p' || lowerText === '/n') {
-      const wss = getWorkspaces() || [];
-      const listStr = wss.length > 0 ? wss.map((w, i) => `${i + 1}. \`${w.uri.split('/').pop() || w.uri}\``).join('\n') + '\n\n' : '';
+      const wss = [...(getWorkspaces() || [])].map(w => ({ ...w, uri: normalizeWorkspaceUri(w.uri) }));
+      const seenWs = new Set(wss.map(w => w.uri));
+      try {
+        const conns = await getAllConnections();
+        for (const conn of conns) {
+          const projUris = await grpc.getAllProjectWorkspaces(conn.port, conn.csrf);
+          for (const u of projUris) {
+            const norm = normalizeWorkspaceUri(u);
+            if (norm && !seenWs.has(norm)) {
+              seenWs.add(norm);
+              wss.push({ type: 'folder', uri: norm });
+            }
+          }
+        }
+      } catch {}
+      try {
+        const convs = await getDynamicConversations();
+        for (const c of convs) {
+          const norm = normalizeWorkspaceUri(c.workspace || '');
+          if (norm && !seenWs.has(norm)) {
+            seenWs.add(norm);
+            wss.push({ type: 'folder', uri: norm });
+          }
+        }
+      } catch {}
+      const formatWsName = (uri: string) => {
+        const raw = uri.split('/').pop() || uri;
+        try { return decodeURIComponent(raw); } catch { return raw; }
+      };
+      const listStr = wss.length > 0 ? wss.map((w, i) => `${i + 1}. \`${formatWsName(w.uri)}\``).join('\n') + '\n\n' : '';
       const newOpt = `${wss.length + 1}. ✨ [创建新项目]`;
       feishuStore.updateSession(openId, { state: 'selecting_workspace', workspacesCache: wss.map(w => w.uri) });
       await sendFeishuText(openId, `请选择工作区编号 (1-${wss.length + 1}):\n\n${listStr}${newOpt}`);
       return;
     }
 
-    if (lowerText === '/history' || lowerText === '/his') {
+    if (lowerText === '/history' || lowerText === '/his' || lowerText === '/h') {
       const convs = (await getDynamicConversations()).slice(0, 10);
       if (convs.length === 0) {
         await sendFeishuText(openId, '近期没有历史会话。');
@@ -433,8 +565,9 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
         const wsName = wsUri.split('/').pop() || wsUri;
         
         // Check if this workspace has bound workspace bots
+        const normalizedWs = normalizeWorkspaceUri(wsUri);
         const boundBots = workspaceBotStore.getAll().filter(
-          b => b.workspaceUri === wsUri && b.enabled && b.appId && b.appSecret
+          b => normalizeWorkspaceUri(b.workspaceUri) === normalizedWs && b.enabled && b.appId && b.appSecret
         );
         
         if (boundBots.length > 0) {
@@ -529,13 +662,16 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
           await sendFeishuText(openId, `✅ 项目 \`${projectName}\` (模式 ${idx === 1 ? '标准' : idx === 2 ? 'GSD' : 'Superpowers'}) 已就绪！将尝试为您在 GUI 中打开...`);
           
           // Launch it in Antigravity Without Blocking
-          const ANTIGRAVITY_CLI = '/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity';
+          const ANTIGRAVITY_CLI = process.platform === 'win32'
+            ? require('path').join(process.env.LOCALAPPDATA || '', 'Programs', 'antigravity', 'Antigravity.exe')
+            : '/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity';
           if (fs.existsSync(ANTIGRAVITY_CLI)) {
             cp.spawn(ANTIGRAVITY_CLI, ['--new-window', projDir], { detached: true, stdio: 'ignore' }).unref();
           }
           
           // Auto-bind: wait for the new language server to come online, then create a cascade
-          const wsUri = `file://${projDir}`;
+          const normProjDir = projDir.replace(/\\/g, '/');
+          const wsUri = normalizeWorkspaceUri(normProjDir.startsWith('/') ? `file://${normProjDir}` : `file:///${normProjDir}`);
           await sendFeishuText(openId, `⏳ 正在等待工作区 \`${projectName}\` 的语言服务就绪...`);
           
           let boundSuccess = false;
@@ -543,7 +679,7 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
             await new Promise(r => setTimeout(r, 2000)); // poll every 2s, up to 30s
             const freshServers = await discoverLanguageServers();
             const match = freshServers.find(s =>
-              s.workspace?.includes(projDir) || projDir.includes(s.workspace || '\0')
+              !s.workspace || s.workspace.includes(normProjDir) || normProjDir.includes(s.workspace)
             );
             if (match) {
               try {
@@ -679,6 +815,9 @@ export async function startFeishuClient(): Promise<{ success: boolean; error?: s
           const res = await grpc.startCascade(targetServer.port, targetServer.csrf, apiKey, wsUri!);
           const newId = res.cascadeId;
           if (newId) {
+            await grpc.updateConversationAnnotations(targetServer.port, targetServer.csrf, apiKey, newId, {
+              lastUserViewTime: new Date().toISOString()
+            }).catch(() => {});
             addLocalConversation(newId, wsUri!, '来自飞书的新对话');
             feishuStore.updateSession(openId, { state: 'idle', activeCascadeId: newId });
             await sendFeishuText(openId, `✅ 成功绑定新会话！现在您可以直接输入问题。`);
@@ -841,8 +980,23 @@ export async function startWorkspaceBotClient(botConfig: WorkspaceBotConfig): Pr
           await sendFeishuText(openId,
             `🤖 您好！我是 **${wsLabel}** 的专属机器人。\n\n` +
             `💬 请直接发送指令或问题，我会专注于操作此工作区的代码与任务。\n` +
+            `💭 发送 \`/think\` 可开启/关闭显示 AI 思考过程。\n` +
             `📁 绑定工作区: \`${wsUri.split('/').pop()}\``,
             botConfig.appId, botConfig.appSecret
+          );
+          return;
+        }
+
+        const lowerWsText = text.toLowerCase();
+        if (lowerWsText === '/think' || lowerWsText === '/thought' || lowerWsText === '/think on' || lowerWsText === '/think off') {
+          const prevCfg = feishuConfigStore.get();
+          const next = lowerWsText.endsWith(' on') ? true : lowerWsText.endsWith(' off') ? false : !Boolean(prevCfg.showThoughts);
+          feishuConfigStore.set({ ...prevCfg, showThoughts: next });
+          await sendFeishuText(
+            openId,
+            next ? '💭 已**开启**飞书端显示 AI 思考过程。' : '🙈 已**关闭**飞书端显示 AI 思考过程。',
+            botConfig.appId,
+            botConfig.appSecret
           );
           return;
         }

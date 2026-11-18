@@ -11,15 +11,22 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'Missing path parameter' }, { status: 400 });
   }
   
-  let absolutePath = pathParam.replace('file://', '');
+  let absolutePath = pathParam.replace(/^file:\/\//, '');
+  try { absolutePath = decodeURIComponent(absolutePath); } catch {}
+  if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(absolutePath)) {
+    absolutePath = absolutePath.slice(1);
+  }
   
   // Security Fix: Prevent Local File Inclusion (LFI) / Path Traversal
   try {
     absolutePath = path.resolve(absolutePath); // Resolve to absolute path, neutralizing ../
     
-    const homeDir = os.homedir();
+    const homeDir = path.resolve(os.homedir());
+    const isUnderHome = process.platform === 'win32'
+      ? absolutePath.toLowerCase().startsWith(homeDir.toLowerCase())
+      : absolutePath.startsWith(homeDir);
     // Allow access to the user's home directory (since AI might edit files anywhere in home)
-    if (!absolutePath.startsWith(homeDir)) {
+    if (!isUnderHome) {
       console.warn(`[Security] Blocked unauthorized file access: ${absolutePath}`);
       return NextResponse.json({ error: 'Forbidden path access' }, { status: 403 });
     }

@@ -51,13 +51,18 @@ export async function POST(req: Request) {
     mkdirSync(folderPath, { recursive: true });
 
     let servers = await discoverLanguageServers();
-    let pgServer = servers.find(s => s.workspace?.endsWith('/playground') || s.workspace?.includes('/playground/'));
+    let pgServer = servers.find(s => !s.workspace || s.workspace.endsWith('/playground') || s.workspace.includes('/playground/'));
 
     if (!pgServer) {
       log.info('No Playground server found, auto-launching...');
       try {
         const { execSync } = require('child_process');
-        const ANTIGRAVITY_CLI = '/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity';
+        const { existsSync } = require('fs');
+        const ANTIGRAVITY_CLI = process.platform === 'win32'
+          ? (existsSync(path.join(process.env.LOCALAPPDATA || '', 'Programs', 'antigravity', 'Antigravity.exe'))
+              ? path.join(process.env.LOCALAPPDATA || '', 'Programs', 'antigravity', 'Antigravity.exe')
+              : 'antigravity')
+          : '/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity';
         execSync(`"${ANTIGRAVITY_CLI}" --new-window "${PLAYGROUND_DIR_PATH}"`, {
           timeout: 5000,
           stdio: 'ignore',
@@ -68,7 +73,7 @@ export async function POST(req: Request) {
         while (retries > 0 && !pgServer) {
           await new Promise(r => setTimeout(r, 500));
           servers = await discoverLanguageServers();
-          pgServer = servers.find(s => s.workspace?.endsWith('/playground') || s.workspace?.includes('/playground/'));
+          pgServer = servers.find(s => !s.workspace || s.workspace.endsWith('/playground') || s.workspace.includes('/playground/'));
           retries--;
         }
       } catch (e: any) {
@@ -79,8 +84,9 @@ export async function POST(req: Request) {
     if (!pgServer) return NextResponse.json({ error: 'No Playground language_server found (failed to auto-launch)' }, { status: 503 });
 
     try {
-      await grpc.addTrackedWorkspace(pgServer.port, pgServer.csrf, folderPath);
-      const wsUri = `file://${folderPath}`;
+      await grpc.addTrackedWorkspace(pgServer.port, pgServer.csrf, folderPath).catch(() => null);
+      const normFolder = folderPath.replace(/\\/g, '/');
+      const wsUri = normFolder.startsWith('/') ? `file://${normFolder}` : `file:///${normFolder}`;
       const data = await grpc.startCascade(pgServer.port, pgServer.csrf, apiKey, wsUri);
       if (data.cascadeId) {
         addLocalConversation(data.cascadeId, wsUri, `Playground: ${name}`);
@@ -100,9 +106,9 @@ export async function POST(req: Request) {
   log.info({ workspace, wsUri }, 'New conversation started');
   log.debug({ rawWorkspace: workspace, resolvedUri: wsUri }, 'Request details');
 
-  // Find a matching server for this workspace
+  // Find a matching server for this workspace (hub servers without srv.workspace handle all workspaces)
   const srv = await getLanguageServer(wsUri);
-  const isMatch = !!srv && (srv.workspace === wsUri || srv.workspace?.includes(wsUri) || wsUri.includes(srv.workspace || '\0'));
+  const isMatch = !!srv && (!srv.workspace || srv.workspace === wsUri || srv.workspace.includes(wsUri) || wsUri.includes(srv.workspace));
 
   if (!srv || !isMatch) {
     log.warn({ wsUri }, 'No matching server — workspace needs to be opened first');
@@ -116,10 +122,13 @@ export async function POST(req: Request) {
   log.info({ port: srv.port, pid: srv.pid, workspace: srv.workspace }, 'Matched server');
 
   try {
-    // Step 1: AddTrackedWorkspace
-    const workspacePath = wsUri.replace(/^file:\/\//, '');
+    // Step 1: AddTrackedWorkspace (non-fatal in hub mode where projects are managed via projectEnvConfig)
+    let workspacePath = decodeURIComponent(wsUri.replace(/^file:\/\//, ''));
+    if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(workspacePath)) {
+      workspacePath = workspacePath.slice(1);
+    }
     log.debug({ port: srv.port, workspacePath }, 'Step1 AddTrackedWorkspace');
-    const addResult = await grpc.addTrackedWorkspace(srv.port, srv.csrf, workspacePath);
+    const addResult = await grpc.addTrackedWorkspace(srv.port, srv.csrf, workspacePath).catch(() => null);
     log.debug({ response: addResult }, 'Step1 Response');
 
     // Step 2: StartCascade

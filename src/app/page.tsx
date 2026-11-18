@@ -441,6 +441,15 @@ export default function Home() {
         activeId={activeId}
         onSelect={handleSelect}
         onNew={handleNew}
+        onDeleted={(deletedIds) => {
+          if (activeId && deletedIds.includes(activeId)) {
+            setActiveId(null);
+            activeIdRef.current = null;
+            setActiveTitle('Antigravity');
+            setSteps(null);
+          }
+          setActiveTasks(prev => prev.filter(t => !deletedIds.includes(t.cascadeId)));
+        }}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         onKnowledgeOpen={() => setKnowledgePanelOpen(true)}

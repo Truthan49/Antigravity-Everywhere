@@ -1,9 +1,20 @@
 import { NextResponse } from 'next/server';
-import { getAllConnections, grpc } from '@/lib/bridge/gateway';
-import fs, { existsSync } from 'fs';
+import { getAllConnections, getDynamicConversations, grpc, normalizeWorkspaceUri } from '@/lib/bridge/gateway';
+import fs, { existsSync, mkdirSync, copyFileSync, rmSync, writeFileSync } from 'fs';
+import { homedir } from 'os';
+import { exec } from 'child_process';
 import path from 'path';
 
 export const dynamic = 'force-dynamic';
+
+function uriToFsPath(uriOrPath: string): string {
+  let p = uriOrPath.replace(/^file:\/\//, '');
+  try { p = decodeURIComponent(p); } catch {}
+  if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(p)) {
+    p = p.slice(1);
+  }
+  return p;
+}
 
 export async function GET() {
   try {
@@ -17,9 +28,21 @@ export async function GET() {
     for (const rule of globalRules) {
       ruleMap.set(rule.name, rule);
     }
+
+    const wsUris = new Set<string>();
     for (const conn of conns) {
-      if (!conn.workspace) continue;
-      const wsPath = conn.workspace.replace(/^file:\/\//, '');
+      if (conn.workspace) wsUris.add(normalizeWorkspaceUri(conn.workspace));
+    }
+    try {
+      const convs = await getDynamicConversations();
+      for (const c of convs) {
+        if (c.workspace) wsUris.add(normalizeWorkspaceUri(c.workspace));
+      }
+    } catch {}
+
+    for (const wsUri of wsUris) {
+      if (!wsUri) continue;
+      const wsPath = uriToFsPath(wsUri);
 
       // 1. Manually parse local rules from `.agents/rules.md` and `.agents/rules/*.md`
       const tryAddRule = (filepath: string, defaultName: string) => {
@@ -37,19 +60,17 @@ export async function GET() {
               content,
               scope: 'workspace',
               baseDir: path.dirname(filepath),
-              workspace: conn.workspace
+              workspace: wsUri
             });
           }
         } catch(e) {}
       };
 
       try {
-        // Single file check
         tryAddRule(path.join(wsPath, '.agents', 'rules.md'), 'project-rules');
         tryAddRule(path.join(wsPath, '.cursorrules'), 'cursor-rules');
         tryAddRule(path.join(wsPath, '.clinerules'), 'cline-rules');
         
-        // Directory check
         const rulesDir = path.join(wsPath, '.agents', 'rules');
         if (existsSync(rulesDir) && fs.statSync(rulesDir).isDirectory()) {
           const files = fs.readdirSync(rulesDir);
@@ -60,7 +81,9 @@ export async function GET() {
           }
         }
       } catch(e) { console.error('Error reading local rules', e) }
+    }
 
+    for (const conn of conns) {
       // 2. Try gRPC as fallback
       try {
         const data = await grpc.getAllRules(conn.port, conn.csrf);
@@ -88,13 +111,16 @@ export async function GET() {
   }
 }
 
-import { mkdirSync, copyFileSync, rmSync, writeFileSync } from 'fs';
-import { homedir } from 'os';
-import { exec } from 'child_process';
-
 const openFileInEditor = (pathToOpen: string) => {
   exec(`code "${pathToOpen}"`, (err: Error | null) => {
-    if (err) exec(`open "${pathToOpen}"`);
+    if (!err) return;
+    if (process.platform === 'win32') {
+      exec(`cmd /c start "" "${pathToOpen}"`);
+    } else if (process.platform === 'darwin') {
+      exec(`open "${pathToOpen}"`);
+    } else {
+      exec(`xdg-open "${pathToOpen}"`);
+    }
   });
 };
 
@@ -107,7 +133,7 @@ export async function POST(req: Request) {
       const { workspace, name, description } = body;
       if (!workspace || !name) throw new Error('Workspace and name are required');
 
-      const wsPath = workspace.replace('file://', '');
+      const wsPath = uriToFsPath(workspace);
       const rulesDir = path.join(wsPath, '.agents', 'rules');
       if (!existsSync(rulesDir)) mkdirSync(rulesDir, { recursive: true });
 
@@ -131,14 +157,14 @@ Write your custom rule guidelines here...
     }
 
     if (action === 'open') {
-      const { filepath } = body;
+      const filepath = body.filepath ? uriToFsPath(body.filepath) : '';
       if (!filepath || !existsSync(filepath)) throw new Error('File not found at: ' + filepath);
       openFileInEditor(filepath);
       return NextResponse.json({ success: true });
     }
 
     if (action === 'promote') {
-      const { filepath } = body;
+      const filepath = body.filepath ? uriToFsPath(body.filepath) : '';
       if (!filepath || !existsSync(filepath)) throw new Error('File not found at: ' + filepath);
 
       const globalDir = path.join(homedir(), '.agents', 'rules');
@@ -154,7 +180,7 @@ Write your custom rule guidelines here...
     }
 
     if (action === 'delete') {
-      const { filepath } = body;
+      const filepath = body.filepath ? uriToFsPath(body.filepath) : '';
       if (!filepath || !existsSync(filepath)) throw new Error('File not found at: ' + filepath);
       rmSync(filepath);
       return NextResponse.json({ success: true });

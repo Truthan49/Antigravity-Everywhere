@@ -4,7 +4,6 @@ import { ChevronDown, ChevronUp, BookOpen, Terminal, BotMessageSquare, Globe, Ac
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import type { Skill, Workflow, Rule, CloudSkill } from '@/lib/types';
 import { CloudDownload, Star, Download as ArrowDownToLine } from 'lucide-react';
@@ -43,6 +42,13 @@ interface AssetPanelProps {
   onStoreOpen?: () => void;
 }
 
+function formatWorkspacePath(uri: string): string {
+  let raw = uri.replace(/^file:\/\//, '');
+  try { raw = decodeURIComponent(raw); } catch {}
+  if (/^\/[a-zA-Z]:/.test(raw)) raw = raw.slice(1);
+  return raw;
+}
+
 export function AssetPanel({
   bottomPanelOpen,
   setBottomPanelOpen,
@@ -78,20 +84,20 @@ export function AssetPanel({
 }: AssetPanelProps) {
 
   return (
-    <div className={cn("flex flex-col shrink-0 bg-muted/20 transition-all duration-300", bottomPanelOpen ? "h-[260px] p-4 pt-1 border-t" : "h-[45px] p-1 border-t")}>
-      <div className="flex items-center justify-between mb-1 px-3 mt-1 cursor-pointer" onClick={() => setBottomPanelOpen(!bottomPanelOpen)}>
+    <div className={cn("flex flex-col shrink-0 bg-muted/20 transition-all duration-300 border-t", bottomPanelOpen ? "h-[320px] p-3 pt-1.5" : "h-[45px] p-1")}>
+      <div className="flex items-center justify-between mb-1 px-2 mt-0.5 cursor-pointer shrink-0" onClick={() => setBottomPanelOpen(!bottomPanelOpen)}>
         <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground hidden md:block group-hover:text-foreground transition-colors">资产与监控 (Assets)</span>
         <Button variant="ghost" size="icon" className="h-6 w-6 ml-auto hover:bg-muted">
           {bottomPanelOpen ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronUp className="h-4 w-4 text-muted-foreground" />}
         </Button>
       </div>
       {bottomPanelOpen && (
-      <Tabs defaultValue="skills" className="w-full h-full flex flex-col min-h-0">
-        <div className="w-full border-b overflow-x-auto scrollbar-hide">
-          <TabsList className="flex w-fit justify-start h-8 px-1 py-0.5 bg-background border-none">
+      <Tabs defaultValue="skills" className="w-full flex-1 flex flex-col min-h-0">
+        <div className="w-full border-b pb-1.5 shrink-0">
+          <TabsList className="flex flex-wrap w-full h-auto justify-start gap-1 p-1 bg-background/80 border-none">
             <TabsTrigger 
               value="store_fake" 
-              className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer text-indigo-500"
+              className="text-[10px] font-bold h-6 px-2 cursor-pointer text-indigo-500"
               onPointerDown={(e) => {
                 e.preventDefault();
                 onStoreOpen?.();
@@ -99,27 +105,27 @@ export function AssetPanel({
             >
               <CloudDownload className="w-3 h-3 mr-1" />云端发现
             </TabsTrigger>
-            <TabsTrigger value="skills" className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer">
+            <TabsTrigger value="skills" className="text-[10px] font-bold h-6 px-2 cursor-pointer">
               本地技能
             </TabsTrigger>
-            <TabsTrigger value="flows" className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer">
+            <TabsTrigger value="flows" className="text-[10px] font-bold h-6 px-2 cursor-pointer">
               工作流
             </TabsTrigger>
-            <TabsTrigger value="rules" className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer">
+            <TabsTrigger value="rules" className="text-[10px] font-bold h-6 px-2 cursor-pointer">
               规则
             </TabsTrigger>
-            <TabsTrigger value="servers" className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer">
+            <TabsTrigger value="servers" className="text-[10px] font-bold h-6 px-2 cursor-pointer">
               工作区
             </TabsTrigger>
-            <TabsTrigger value="knowledge" className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer" onClick={() => onKnowledgeOpen?.()}>
+            <TabsTrigger value="knowledge" className="text-[10px] font-bold h-6 px-2 cursor-pointer" onClick={() => onKnowledgeOpen?.()}>
               <BookOpen className="w-3 h-3 mr-0.5" />知识库
             </TabsTrigger>
-            <TabsTrigger value="logs" className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer" onClick={() => onLogsOpen?.()}>
+            <TabsTrigger value="logs" className="text-[10px] font-bold h-6 px-2 cursor-pointer" onClick={() => onLogsOpen?.()}>
               <Terminal className="w-3 h-3 mr-0.5" />日志
             </TabsTrigger>
             <TabsTrigger 
               value="feishu_fake" 
-              className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer"
+              className="text-[10px] font-bold h-6 px-2 cursor-pointer"
               onPointerDown={(e) => {
                 e.preventDefault();
                 onBotManagementOpen?.();
@@ -127,12 +133,12 @@ export function AssetPanel({
             >
               <BotMessageSquare className="w-3 h-3 mr-0.5 text-indigo-500" />飞书配置
             </TabsTrigger>
-            <TabsTrigger value="tunnel" className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer" onClick={() => setTunnelConfigOpen(true)}>
+            <TabsTrigger value="tunnel" className="text-[10px] font-bold h-6 px-2 cursor-pointer" onClick={() => setTunnelConfigOpen(true)}>
               <Globe className="w-3 h-3 mr-0.5 text-emerald-500" />内网穿透
             </TabsTrigger>
             <TabsTrigger 
               value="analytics_fake"
-              className="text-[10px] font-bold shrink-0 min-w-fit px-3 cursor-pointer" 
+              className="text-[10px] font-bold h-6 px-2 cursor-pointer" 
               onPointerDown={(e) => {
                 e.preventDefault(); // Prevent tab switch
                 setAnalyticsOpen(true);
@@ -143,8 +149,7 @@ export function AssetPanel({
           </TabsList>
         </div>
         
-        <div className="flex-1 overflow-hidden min-h-0 mt-3">
-          <ScrollArea className="h-full">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0 mt-2 py-0.5 pr-1">
             <TabsContent value="skills" className="m-0 space-y-4 pr-3">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-semibold text-muted-foreground">技能列表</span>
@@ -311,13 +316,13 @@ export function AssetPanel({
                 <div className="text-center text-[11px] text-muted-foreground py-8">未定义规则</div>
               )}
             </TabsContent>
-            <TabsContent value="servers" className="m-0 space-y-2.5 pr-3">
+            <TabsContent value="servers" className="m-0 space-y-2 pr-1">
               {wsOptions.length > 0 ? wsOptions.map(([uri, info]) => (
-                <div key={uri} className={cn("flex items-center gap-2 p-2 rounded-lg border bg-background group", info.hidden && "opacity-40")}>
+                <div key={uri} className={cn("flex items-center gap-2 p-2 rounded-lg border bg-background group w-full overflow-hidden", info.hidden && "opacity-40")}>
                   <div className={cn("w-2 h-2 rounded-full shrink-0", info.running ? (info.hidden ? "bg-amber-500" : "bg-emerald-500") : "bg-muted-foreground/30")} />
                   <div className="flex-1 min-w-0">
                     <div className="text-xs font-semibold truncate">{info.name}</div>
-                    <div className="text-[10px] text-muted-foreground truncate">{uri.replace('file://', '')}</div>
+                    <div className="text-[10px] text-muted-foreground truncate">{formatWorkspacePath(uri)}</div>
                   </div>
                   {info.hidden ? (
                     <Button
@@ -366,8 +371,9 @@ export function AssetPanel({
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity text-emerald-600 hover:text-emerald-600"
+                      className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity text-emerald-600 hover:text-emerald-600 cursor-pointer"
                       onClick={() => handleLaunchWorkspace(uri)}
+                      title="在 Antigravity 中打开此工作区"
                     >
                       <Power className="h-3 w-3" />
                     </Button>
@@ -377,7 +383,6 @@ export function AssetPanel({
                 <div className="text-center text-[11px] text-muted-foreground py-8">没有找到工作空间</div>
               )}
             </TabsContent>
-          </ScrollArea>
         </div>
       </Tabs>
       )}

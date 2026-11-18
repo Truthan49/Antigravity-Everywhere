@@ -46,6 +46,11 @@ export function streamAgentState(
   onUpdate: (update: any) => void,
   onError?: (err: Error) => void,
 ): () => void {
+  if (!port || !csrf) {
+    queueMicrotask(() => onError?.(new Error('Missing language server port or CSRF token')));
+    return () => {};
+  }
+
   const body = buildConnectEnvelope({
     conversationId,
     subscriberId: `gateway-${Date.now()}`,
@@ -118,6 +123,9 @@ export interface GrpcCallOptions {
  * Make a gRPC-Web call to the language_server.
  */
 export function grpcCall(opts: GrpcCallOptions): Promise<any> {
+  if (!opts.port || !opts.csrf) {
+    return Promise.reject(new Error('Missing language server port or CSRF token'));
+  }
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(opts.body);
     const req = https.request({
@@ -185,15 +193,119 @@ export function buildCascadeConfig(model: string = 'MODEL_PLACEHOLDER_M26', agen
   };
 }
 
-export async function startCascade(port: number, csrf: string, apiKey: string, workspaceUri: string) {
+function normalizeUriForMatch(uri: string): string {
+  if (!uri) return '';
+  let decoded = uri.replace(/^file:\/\/\/([a-zA-Z])(?:%3[Aa]|:)\//, (_m, d: string) => `file:///${d.toLowerCase()}:/`);
+  try { decoded = decodeURIComponent(decoded); } catch {}
+  return decoded.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+export async function getUserStatus(port: number, csrf: string) {
+  return grpcCall({
+    port, csrf,
+    method: 'GetUserStatus',
+    body: {},
+  });
+}
+
+export async function listProjects(port: number, csrf: string): Promise<string[]> {
+  const res = await grpcCall({
+    port, csrf,
+    method: 'ListProjects',
+    body: {},
+  });
+  return Array.isArray(res?.projectIds) ? res.projectIds : [];
+}
+
+export async function readProjects(port: number, csrf: string, ids: string[]): Promise<any[]> {
+  if (!ids.length) return [];
+  const res = await grpcCall({
+    port, csrf,
+    method: 'ReadProjects',
+    body: { ids },
+  });
+  return Array.isArray(res?.projects) ? res.projects : [];
+}
+
+export async function getAllProjectWorkspaces(port: number, csrf: string): Promise<string[]> {
+  try {
+    const ids = await listProjects(port, csrf);
+    const projects = await readProjects(port, csrf, ids);
+    const uris: string[] = [];
+    for (const p of projects) {
+      if (!p?.id || p.id === 'outside-of-project' || p.sidecar) continue;
+      const resources = p?.projectResources?.resources || [];
+      for (const r of resources) {
+        const uri = r?.gitFolder?.folderUri || r?.folderUri;
+        if (uri) uris.push(uri);
+      }
+    }
+    return uris;
+  } catch {
+    return [];
+  }
+}
+
+export async function resolveProjectForWorkspace(
+  port: number,
+  csrf: string,
+  workspaceUri: string
+): Promise<{ projectId: string; folderUri: string } | null> {
+  if (!workspaceUri || workspaceUri.includes('/playground/')) return null;
+  const target = normalizeUriForMatch(workspaceUri);
+  if (!target) return null;
+
+  try {
+    const ids = await listProjects(port, csrf);
+    const projects = await readProjects(port, csrf, ids);
+    for (const p of projects) {
+      if (!p?.id || p.id === 'outside-of-project' || p.sidecar) continue;
+      const resources = p?.projectResources?.resources || [];
+      for (const r of resources) {
+        const uri = r?.gitFolder?.folderUri || r?.folderUri;
+        if (uri && normalizeUriForMatch(uri) === target) {
+          return { projectId: p.id, folderUri: uri };
+        }
+      }
+    }
+  } catch {}
+  return null;
+}
+
+export async function deleteCascadeTrajectory(port: number, csrf: string, cascadeId: string) {
+  return grpcCall({
+    port, csrf,
+    method: 'DeleteCascadeTrajectory',
+    body: { cascadeId },
+  });
+}
+
+export async function startCascade(port: number, csrf: string, apiKey: string, workspaceUri: string, projectId?: string) {
+  let resolvedProjectId = projectId;
+  if (!resolvedProjectId && workspaceUri) {
+    const matched = await resolveProjectForWorkspace(port, csrf, workspaceUri);
+    if (matched) resolvedProjectId = matched.projectId;
+  }
+
+  const body: Record<string, any> = {
+    metadata: buildMetadata(apiKey),
+    source: 'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',
+  };
+
+  if (resolvedProjectId) {
+    // language_server rejects requests that set both workspaceUris and projectEnvConfig
+    body.projectEnvConfig = {
+      projectId: resolvedProjectId,
+      defaultProjectEnvironment: {},
+    };
+  } else {
+    body.workspaceUris = [workspaceUri];
+  }
+
   return grpcCall({
     port, csrf,
     method: 'StartCascade',
-    body: {
-      metadata: buildMetadata(apiKey),
-      source: 'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',
-      workspaceUris: [workspaceUri],
-    },
+    body,
   });
 }
 

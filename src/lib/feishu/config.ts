@@ -8,6 +8,7 @@ const WS_BOT_DIR = join(homedir(), '.gemini', 'antigravity', 'workspace-bots');
 export interface FeishuConfig {
   appId: string;
   appSecret: string;
+  showThoughts?: boolean;
 }
 
 export interface WorkspaceBotConfig extends FeishuConfig {
@@ -27,18 +28,29 @@ export const feishuConfigStore = {
   get(): FeishuConfig {
     try {
       if (!existsSync(CONFIG_PATH)) {
-        return { appId: '', appSecret: '' };
+        return { appId: '', appSecret: '', showThoughts: false };
       }
-      return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+      const parsed = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+      return {
+        appId: parsed.appId || '',
+        appSecret: parsed.appSecret || '',
+        showThoughts: Boolean(parsed.showThoughts),
+      };
     } catch {
-      return { appId: '', appSecret: '' };
+      return { appId: '', appSecret: '', showThoughts: false };
     }
   },
 
   set(config: FeishuConfig) {
     try {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
-      writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
+      const prev = this.get();
+      const next: FeishuConfig = {
+        appId: config.appId ?? prev.appId,
+        appSecret: config.appSecret ?? prev.appSecret,
+        showThoughts: config.showThoughts !== undefined ? Boolean(config.showThoughts) : Boolean(prev.showThoughts),
+      };
+      writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), 'utf-8');
     } catch (e) {
       console.error('Failed to save feishu config', e);
     }
